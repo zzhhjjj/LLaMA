@@ -2,3 +2,5 @@ __pycache__
 .venv
 .vscode
 *.ipynb
+.cache
+llama.egg-info
