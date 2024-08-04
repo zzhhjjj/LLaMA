@@ -4,15 +4,13 @@ import torch
 from dataclasses import dataclass
 import torch.nn as nn
 import torch.nn.functional as F
-
+from flash_attn.flash_attn_interface import flash_attn_func
 import lovely_tensors as lt
 from lovely_tensors import set_config
 set_config(precision=6)
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def apply_rotary_pos_emb(x, cos, sin):
-    # take x of shape (batch_size, num_heads, seq_length, head_dim)
-    # cos, sin of shape (seq_length, head_dim)
     batch_size, num_head, seq_length, head_dim = x.size()
     assert cos.size(0)==seq_length
     assert cos.size(1)==head_dim
@@ -23,13 +21,28 @@ def apply_rotary_pos_emb(x, cos, sin):
     return x
 
 def get_cos_sin(seq_length, head_dim, base=500000.0):
-    # take sequence length and head dimension as input.
-    # return (seq_length, head_dim)
     assert head_dim%2==0
-    i = torch.arange(head_dim//2).unsqueeze(0).to(device)
-    position = torch.arange(seq_length).unsqueeze(1).to(device)
-    angle = 1.0/(base**(2*i/head_dim))
-    return torch.cos(position*angle).repeat(1,2), torch.sin(position*angle).repeat(1,2)
+    i = torch.arange(head_dim//2,dtype=torch.int64).float().unsqueeze(0).to(device) # [1, head_dim//2]
+    theta = 1.0/(base**(2*i/head_dim)) # [1, head_dim//2]
+    position = torch.arange(seq_length).unsqueeze(1).to(device) # [seq_length, 1]
+    return torch.cos(position*theta).repeat(1,2), torch.sin(position*theta).repeat(1,2) # [seq_length, head_dim], [seq_length, head_dim]
+
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+def flash_attention(q, k, v):
+    q = q.permute(0, 2, 1, 3) # [batch_size, seq_length, num_head , head_dim]
+    k = k.permute(0, 2, 1, 3) # [batch_size, seq_length, num_head , head_dim]
+    v = v.permute(0, 2, 1, 3) # [batch_size, seq_length, num_head , head_dim]
+    return flash_attn_func(q, k, v, causal=True)
 
 def scaled_dot_product_attention(q,k,v,is_causal=True,mask=None):
     # input: q,k,v of shape (batch_size, num_head, seq_length, head_dim) 
@@ -51,88 +64,47 @@ class CausalSelfAttention(nn.Module):
         self.num_heads = config.num_heads
         self.num_key_values = config.num_key_values
         self.head_dim = self.hidden_dim//self.num_heads
-        self.qkv_proj = nn.Linear(config.hidden_dim, self.num_heads*self.head_dim + 2*self.num_key_values*self.head_dim, bias=False)
+        self.is_merged_qkv_weight = os.getenv('is_merged_qkv_weight', '1')
+        if self.is_merged_qkv_weight  == '1': 
+            self.qkv_proj = nn.Linear(config.hidden_dim, self.num_heads*self.head_dim + 2*self.num_key_values*self.head_dim, bias=False)
+        else:
+            self.q_proj = nn.Linear(config.hidden_dim, self.num_heads*self.head_dim, bias=False)
+            self.k_proj = nn.Linear(config.hidden_dim, self.num_key_values*self.head_dim, bias=False)
+            self.v_proj = nn.Linear(config.hidden_dim, self.num_key_values*self.head_dim, bias=False)
         self.out_proj = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
         self.layer_idx = layer_idx
         
         ## TODO support mask
     
     def forward(self, x, cos, sin, attention_mask=None, debug_arguments=None):
-        if debug_arguments!=None:
-            return self.debug_forward(x, cos, sin, attention_mask, debug_arguments)
+        batch_size, seq_length, hidden_dim = x.size()
+        if self.is_merged_qkv_weight == '1':
+            qkv = self.qkv_proj(x) # [batch_size, seq_length, num_heads*head_dim + 2*num_key_values*head_dim]
+            q, k, v = torch.split(qkv,
+                [
+                    self.num_heads * self.head_dim,
+                    self.num_key_values * self.head_dim,
+                    self.num_key_values * self.head_dim,
+                ],
+                dim=-1,
+            )
         else:
-            return self.normal_forward(x, cos, sin, attention_mask)
-        
-    def normal_forward(self, x, cos, sin, attention_mask=None):
-        batch_size, seq_length, hidden_dim = x.size()
-        qkv = self.qkv_proj(x) # [batch_size, seq_length, num_heads*head_dim + 2*num_key_values*head_dim]
-        
-        q, k, v = torch.split(qkv,
-            [
-                self.num_heads * self.head_dim,
-                self.num_key_values * self.head_dim,
-                self.num_key_values * self.head_dim,
-            ],
-            dim=-1,
-        )
+            q = self.q_proj(x)
+            k = self.k_proj(x)
+            v = self.v_proj(x)
         q = q.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2) # [batch_size, num_heads, seq_length, head_dim]
         k = k.view(batch_size, seq_length, self.num_key_values, self.head_dim).transpose(1, 2) # [batch_size, num_key_values, seq_length, head_dim]
         v = v.view(batch_size, seq_length, self.num_key_values, self.head_dim).transpose(1, 2) # [batch_size, num_key_values, seq_length, head_dim]
         q = apply_rotary_pos_emb(q, cos, sin)
         k = apply_rotary_pos_emb(k, cos, sin)
-        k = k.repeat_interleave(self.num_heads // self.num_key_values, dim=1) # [batch_size, num_heads, seq_length, head_dim]
-        v = v.repeat_interleave(self.num_heads // self.num_key_values, dim=1) # [batch_size, num_heads, seq_length, head_dim]
+        # k = k.repeat_interleave(self.num_heads // self.num_key_values, dim=1) # [batch_size, num_heads, seq_length, head_dim]
+        # v = v.repeat_interleave(self.num_heads // self.num_key_values, dim=1) # [batch_size, num_heads, seq_length, head_dim]
+        k = repeat_kv(k,self.num_heads // self.num_key_values)
+        v = repeat_kv(v,self.num_heads // self.num_key_values)
         out = F.scaled_dot_product_attention(q, k, v, is_causal=True) # [batch_size, num_heads, seq_length, head_dim]
+        # out = flash_attention(q, k, v) # [batch_size, num_heads, seq_length, head_dim] 
         out = out.transpose(1, 2).reshape(batch_size, seq_length, self.num_heads * self.head_dim) # [batch_size, seq_length, hidden_dim]
         out = self.out_proj(out) # [batch_size, seq_length, hidden_dim]
-        return out
-    
-    # debug_arguments = 
-    # {
-    #     'layers': [0,1,2,3, ... ], # layers to print
-    #     'variables': [1,2,3, ...], # variables to print
-    # }
-    def debug_forward(self, x, cos, sin, attention_mask=None,debug_arguments=None):
-        assert debug_arguments!=None and 'layers' in debug_arguments and 'variables' in debug_arguments
-        layers = debug_arguments['layers']
-        variables = debug_arguments['variables']
-        
-        batch_size, seq_length, hidden_dim = x.size()
-        qkv = self.qkv_proj(x) # [batch_size, seq_length, num_heads*head_dim + 2*num_key_values*head_dim]
-        
-        q, k, v = torch.split(qkv,
-            [
-                self.num_heads * self.head_dim,
-                self.num_key_values * self.head_dim,
-                self.num_key_values * self.head_dim,
-            ],
-            dim=-1,
-        )
-
-        q = q.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2) # [batch_size, num_heads, seq_length, head_dim]
-        k = k.view(batch_size, seq_length, self.num_key_values, self.head_dim).transpose(1, 2) # [batch_size, num_key_values, seq_length, head_dim]
-        v = v.view(batch_size, seq_length, self.num_key_values, self.head_dim).transpose(1, 2) # [batch_size, num_key_values, seq_length, head_dim]
-        
-        if self.layer_idx in layers and 2 in variables:
-            print("Q reshaped:", q)
-            print("K reshaped:", k)
-            print("V reshaped:", v)
-
-        q = apply_rotary_pos_emb(q, cos, sin)
-        k = apply_rotary_pos_emb(k, cos, sin)
-        
-        if self.layer_idx in layers and 3 in variables:
-            print("Q after rotary pos emb:", q)
-            print("K after rotary pos emb:", k)
-
-        k = k.repeat_interleave(self.num_heads // self.num_key_values, dim=1) # [batch_size, num_heads, seq_length, head_dim]
-        v = v.repeat_interleave(self.num_heads // self.num_key_values, dim=1) # [batch_size, num_heads, seq_length, head_dim]
-
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True) # [batch_size, num_heads, seq_length, head_dim]
-        out = out.transpose(1, 2).reshape(batch_size, seq_length, self.num_heads * self.head_dim) # [batch_size, seq_length, hidden_dim]
-        
-        out = self.out_proj(out) # [batch_size, seq_length, hidden_dim]
-        
         return out
 
 class LlamaRMSNorm(nn.Module):
@@ -172,21 +144,7 @@ class DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
     def forward(self, x, cos, sin, attention_mask = None, debug_arguments = None):
-        if debug_arguments!=None:
-            return self.debug_forward(x, cos, sin, attention_mask, debug_arguments)
         x = x + self.attention(self.input_layernorm(x),cos,sin, debug_arguments = debug_arguments) # Attention 
-        x = x + self.mlp(self.post_attention_layernorm(x)) # MLP
-        return x
-
-    def debug_forward(self, x, cos, sin, attention_mask = None, debug_arguments = None):
-        layers = debug_arguments['layers']
-        variables = debug_arguments['variables']
-        if self.layer_idx in layers:
-            print('Layer: ', self.layer_idx)
-            print("Input hidden states: ", x)
-            print("hidden states after LN:", self.input_layernorm(x))
-            print("Attention output:", self.attention(self.input_layernorm(x),cos,sin))
-        x = x + self.attention(self.input_layernorm(x),cos,sin, debug_arguments = debug_arguments)
         x = x + self.mlp(self.post_attention_layernorm(x)) # MLP
         return x
     
@@ -219,13 +177,6 @@ class LLaMA(nn.Module):
         self.cos, self.sin = get_cos_sin(self.max_position_embeddings, self.head_dim, base = rope_theta) # [max_position_embeddings, head_dim]
         
     def forward(self, input_ids, attention_mask, debug_arguments=None):
-        if debug_arguments:
-            lt.monkey_patch()
-            return self.debug_forward(input_ids, attention_mask, debug_arguments)
-        else:
-            return self.normal_forward(input_ids, attention_mask, debug_arguments)
-    
-    def normal_forward(self, input_ids, attention_mask, debug_arguments=None):
         batch_size, seq_length = input_ids.size()
         x = self.word_embedding(input_ids)
         cos, sin = self.cos[:seq_length], self.sin[:seq_length]
@@ -235,41 +186,5 @@ class LLaMA(nn.Module):
         logits = self.lm_head(x)
         
         return logits  # [batch_size, seq_length, vocab_size]
-
-    def debug_forward(self, input_ids, attention_mask, debug_arguments=None):
-        if debug_arguments is not None:
-            lt.monkey_patch()
-
-        batch_size, seq_length = input_ids.size()
-        x = self.word_embedding(input_ids)
-
-        cos, sin = self.cos[:seq_length], self.sin[:seq_length]
-        print("cos:", cos)
-        print("sin:", sin)
-
-        for i, layer in enumerate(self.layers):
-            x = layer(x, cos, sin, attention_mask, debug_arguments)  # [batch_size, seq_length, hidden_dim]
-
-        x = self.layer_norm(x)
-        print("After Final Layer Norm:", x)
-
-        logits = self.lm_head(x)
-        print("Logits:", logits)
-
-        return logits  # [batch_size, seq_length, vocab_size]
-
-    # def forward(self, input_ids, attention_mask, debug_arguments=None):
-    #     batch_size, seq_length = input_ids.size()
-    #     x = self.word_embedding(input_ids)
-    #     cos, sin = self.cos[:seq_length], self.sin[:seq_length]
-    #     for layer in self.layers:
-    #         x = layer(x, cos, sin, attention_mask, debug_arguments) # [batch_size, seq_length, hidden_dim]
-    #     x = self.layer_norm(x)
-    #     logits = self.lm_head(x)
-        
-    #     return logits # [batch_size, seq_length, vocab_size]
-    
-
 # %%
-
 

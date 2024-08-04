@@ -4,6 +4,7 @@ This script compare the output logits/generated token of my LLaMA model with the
 
 import sys
 from src.model.llama3 import LLaMA
+from src.model.debug_llama import DebugLLaMA
 import torch 
 from dataclasses import dataclass
 from src.weights.weights import load_weights_to_dict, copy_weights_to_model
@@ -21,7 +22,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 seed = 42
 torch.manual_seed(seed)
 
-os.environ['is_merged_qkv_weight'] = '1' # 1/0
+os.environ['MERGED_QKV_WEIGHT'] = '1' # 1/0
 
 @dataclass
 class LLaMAConfig:
@@ -39,13 +40,13 @@ class LLaMAConfig:
 
 ## initialize model 
 config = LLaMAConfig()
-model = LLaMA(config)
+model = DebugLLaMA(config)
 
 ## load weights 
-weights_directory_path = ".cache/models/Meta-Llama-3-8B"
+weights_directory_path = "/fsx/haojun/LLaMA/.cache/models/Meta-Llama-3-8B"
 all_tensors = load_weights_to_dict(weights_directory_path)
 copy_weights_to_model(model, all_tensors)
-model = model.to(device)
+model.to(device)
 
 ## Tokenizer
 pretrained_model_name_or_path = 'meta-llama/Meta-Llama-3-8B'
@@ -61,11 +62,13 @@ input_text = "The future of AI is"
 inputs = tokenizer(input_text, return_tensors="pt").to(device)
 max_new_tokens = 200
 
-with RedirectOutput('/fsx/haojun/LLaMA/.cache/logs/output1.txt'):    # empty string for terminal output
+debug_arguments = {'layers': [0,1], 'variables': [1,2,3,4]}
+
+with RedirectOutput('.cache/logs/output.txt'):    # empty string for terminal output
     ## generate text
     for i in range(max_new_tokens):
         output_logits = transformer_model(**inputs)['logits']
-        my_output_logits = model(**inputs, debug_arguments=None)
+        my_output_logits = model(**inputs, debug_arguments=debug_arguments)
         next_token_id = torch.argmax(output_logits[:, -1, :], dim=-1)
         my_next_token_id = torch.argmax(my_output_logits[:, -1, :], dim=-1)
         # test logits and generation on the same time.

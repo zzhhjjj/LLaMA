@@ -51,8 +51,13 @@ def copy_weights_to_model(model, all_tensors):
         (all_tensors['model.norm.weight'], model.layer_norm.weight)
     ]
     
+    is_merged_qkv_weight = os.getenv('is_merged_qkv_weight', '1')
+    if is_merged_qkv_weight == '1':
+        print(f"Using merged qkv weights: {is_merged_qkv_weight}")
+    else:
+        print("Using seperate qkv weights")
+        
     num_layers = 32
-    
     for i in range(num_layers):
         # LayerNorm
         tasks.append((all_tensors[f'model.layers.{i}.input_layernorm.weight'], model.layers[i].input_layernorm.weight))
@@ -64,14 +69,23 @@ def copy_weights_to_model(model, all_tensors):
         tasks.append((all_tensors[f'model.layers.{i}.mlp.down_proj.weight'], model.layers[i].mlp.down_proj.weight))
         
         # Attention
-        merged_qkv_weight = torch.cat([
-            all_tensors[f'model.layers.{i}.self_attn.q_proj.weight'],
-            all_tensors[f'model.layers.{i}.self_attn.k_proj.weight'],
-            all_tensors[f'model.layers.{i}.self_attn.v_proj.weight']
-        ], dim=0)
-        tasks.append((merged_qkv_weight, model.layers[i].attention.qkv_proj.weight))
+        if is_merged_qkv_weight == '1':
+            ## merged qkv weights
+            merged_qkv_weight = torch.cat([
+                all_tensors[f'model.layers.{i}.self_attn.q_proj.weight'],
+                all_tensors[f'model.layers.{i}.self_attn.k_proj.weight'],
+                all_tensors[f'model.layers.{i}.self_attn.v_proj.weight']
+            ], dim=0)
+            tasks.append((merged_qkv_weight, model.layers[i].attention.qkv_proj.weight))
+        else:
+            ## Seperate qkv weights
+            tasks.append((all_tensors[f'model.layers.{i}.self_attn.q_proj.weight'], model.layers[i].attention.q_proj.weight))
+            tasks.append((all_tensors[f'model.layers.{i}.self_attn.k_proj.weight'], model.layers[i].attention.k_proj.weight))
+            tasks.append((all_tensors[f'model.layers.{i}.self_attn.v_proj.weight'], model.layers[i].attention.v_proj.weight))
+            
+        ## Output project
         tasks.append((all_tensors[f'model.layers.{i}.self_attn.o_proj.weight'], model.layers[i].attention.out_proj.weight))
-    
+
     with ThreadPoolExecutor() as executor:
         list(tqdm(executor.map(lambda task: copy_tensor(*task), tasks), total=len(tasks), desc="Copying weights"))
 
