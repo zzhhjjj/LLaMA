@@ -39,10 +39,10 @@ def DebugDecoderLayerforward(
     
     layers = debug_arguments['layers']
     variables = debug_arguments['variables']
-    if self.layer_idx in layers:
-        print('Layer: ', self.layer_idx)
-        print("Input hidden states:", residual)
-        print("Hidden states after LN:", hidden_states)
+    # if self.layer_idx in layers:
+    #     print('Layer: ', self.layer_idx)
+    #     print("Input hidden states:", residual)
+    #     print("Hidden states after LN:", hidden_states)
         
     if self.layer_idx in layers:
         torch.save(residual.cpu(), os.path.join(folder_to_save, f'layer_{self.layer_idx}_input_hidden_states.pt'))
@@ -63,10 +63,10 @@ def DebugDecoderLayerforward(
 
     hidden_states = residual + hidden_states
 
-    if self.layer_idx in layers:
-        print('Residual + Hidden : ', hidden_states)
-        print("After post attention LN:", self.post_attention_layernorm(hidden_states))
-        print('MLP output:', self.mlp(self.post_attention_layernorm(hidden_states)))
+    # if self.layer_idx in layers:
+    #     print('Residual + Hidden : ', hidden_states)
+    #     print("After post attention LN:", self.post_attention_layernorm(hidden_states))
+    #     print('MLP output:', self.mlp(self.post_attention_layernorm(hidden_states)))
     if self.layer_idx in layers:
         torch.save(hidden_states.cpu(), os.path.join(folder_to_save, f'layer_{self.layer_idx}_residual_plus_hidden.pt'))
         torch.save(self.post_attention_layernorm(hidden_states).cpu(), os.path.join(folder_to_save, f'layer_{self.layer_idx}_post_attention_ln.pt'))
@@ -121,10 +121,11 @@ def DebugSDPAforward(
     layers = debug_arguments['layers']
     variables = debug_arguments['variables']
     
-    if self.layer_idx in layers and 2 in variables:
-        print("Q reshaped:", query_states)
-        print("K reshaped:", key_states)
-        print("V reshaped:", value_states)
+    # if self.layer_idx in layers and 2 in variables:
+    #     print("Q reshaped:", query_states)
+    #     print("K reshaped:", key_states)
+    #     print("V reshaped:", value_states)
+        
     if self.layer_idx in layers and 2 in variables:
         torch.save(query_states.cpu(), os.path.join(folder_to_save, f'layer_{self.layer_idx}_query_reshaped.pt'))
         torch.save(key_states.cpu(), os.path.join(folder_to_save, f'layer_{self.layer_idx}_key_reshaped.pt'))
@@ -132,9 +133,11 @@ def DebugSDPAforward(
 
     cos, sin = self.rotary_emb(value_states, position_ids)
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-    if self.layer_idx in layers and 3 in variables:
-        print("Q after rotary pos emb:", query_states)
-        print("K after rotary pos emb:", key_states)
+    
+    # if self.layer_idx in layers and 3 in variables:
+    #     print("Q after rotary pos emb:", query_states)
+    #     print("K after rotary pos emb:", key_states)
+        
     if self.layer_idx in layers and 3 in variables:
         torch.save(query_states.cpu(), os.path.join(folder_to_save, f'layer_{self.layer_idx}_query_after_rotary.pt'))
         torch.save(key_states.cpu(), os.path.join(folder_to_save, f'layer_{self.layer_idx}_key_after_rotary.pt'))
@@ -170,8 +173,9 @@ def DebugSDPAforward(
         dropout_p=self.attention_dropout if self.training else 0.0,
         is_causal=is_causal,
     )
-    if self.layer_idx in layers:
-        print("SDPA output:", attn_output)
+    # if self.layer_idx in layers:
+    #     print("SDPA output:", attn_output)
+        
     if self.layer_idx in layers:
         torch.save(attn_output.cpu(), os.path.join(folder_to_save, f'layer_{self.layer_idx}_sdpa_output.pt'))
 
@@ -180,8 +184,8 @@ def DebugSDPAforward(
 
     attn_output = self.o_proj(attn_output)
 
-    if self.layer_idx in layers:  
-        print("Self Attention output:", attn_output)
+    # if self.layer_idx in layers:  
+    #     print("Self Attention output:", attn_output)
     if self.layer_idx in layers:
         torch.save(attn_output.cpu(), os.path.join(folder_to_save, f'layer_{self.layer_idx}_self_attention_output.pt'))
 
@@ -233,8 +237,8 @@ def DebugRoPEforward(self, x, position_ids):
     my_cos, my_sin = torch.cos(my_position.to('cpu').float()* my_theta_cpu.float()).repeat(1,2), torch.sin(my_position.to('cpu').float()*my_theta_cpu.float()).repeat(1,2) # != cos, sin
     
     if self.layer_idx == 0: 
-        print("RoPE cos:", cos)
-        print("RoPE sin:", sin)
+        # print("RoPE cos:", cos)
+        # print("RoPE sin:", sin)
         folder_to_save = '/fsx/haojun/LLaMA/.cache/activation_values'
         torch.save(cos.cpu(), os.path.join(folder_to_save, f'cos.pt'))
         saved_cos = torch.load(os.path.join(folder_to_save, f'cos.pt'))
