@@ -11,6 +11,7 @@ from src.weights.weights import load_weights_to_dict, copy_weights_to_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import os
 from tools.debug.logs import RedirectOutput
+from tools.debug.replace_attn import DebugRoPEforward, DebugSDPAforward, DebugDecoderLayerforward
 import lovely_tensors as lt
 lt.monkey_patch()
 from lovely_tensors import set_config
@@ -22,7 +23,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 seed = 42
 torch.manual_seed(seed)
 
-os.environ['MERGED_QKV_WEIGHT'] = '1' # 1/0
+os.environ['MERGED_QKV_WEIGHT'] = '0' # 1/0
 
 @dataclass
 class LLaMAConfig:
@@ -57,23 +58,33 @@ tokenizer.pad_token = tokenizer.eos_token
 transformer_model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, attn_implementation = 'sdpa').to(device)
 # transformer_model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2").to(device)
 
+## Replace the forward function of the transformer model. 
+## Save the activations
+for i, layer in enumerate(transformer_model.model.layers):
+    layer.layer_idx = i
+    layer.forward = DebugDecoderLayerforward.__get__(layer, type(layer))
+    layer.self_attn.forward = DebugSDPAforward.__get__(layer.self_attn, type(layer.self_attn))
+    layer.self_attn.rotary_emb.layer_idx = i
+    layer.self_attn.rotary_emb.forward = DebugRoPEforward.__get__(layer.self_attn.rotary_emb, type(layer.self_attn.rotary_emb))
+
 ## prompt
 input_text = "The future of AI is"
 inputs = tokenizer(input_text, return_tensors="pt").to(device)
 max_new_tokens = 200
 
-debug_arguments = {'layers': [0,1], 'variables': [1,2,3,4]}
+debug_arguments = {'layers': [i for i in range(10)], 'variables': [1,2,3,4]}
 
 with RedirectOutput('.cache/logs/output.txt'):    # empty string for terminal output
     ## generate text
     for i in range(max_new_tokens):
-        output_logits = transformer_model(**inputs)['logits']
+        output_logits = transformer_model(**inputs)['logits'] 
         my_output_logits = model(**inputs, debug_arguments=debug_arguments)
         next_token_id = torch.argmax(output_logits[:, -1, :], dim=-1)
         my_next_token_id = torch.argmax(my_output_logits[:, -1, :], dim=-1)
         # test logits and generation on the same time.
         try:
             torch.testing.assert_close(my_output_logits,output_logits,rtol=1e-5,atol=1e-5) # check if the output logits are close
+            assert torch.equal(my_output_logits,output_logits), "Output logits are not the same"
         except AssertionError as e:
             print(f'Token {i+1} failed: {e}')
             print("Reference: ",output_logits) 

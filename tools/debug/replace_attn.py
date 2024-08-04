@@ -27,7 +27,7 @@ def DebugDecoderLayerforward(
     
     # add debug code here
     debug_arguments = {
-        'layers': [0,1,2], # layers to print
+        'layers': [i for i in range(10)], # layers to print
         'variables': [1,2,3,4], # variables to print
     }
     folder_to_save = '/fsx/haojun/LLaMA/.cache/activation_values'
@@ -43,11 +43,11 @@ def DebugDecoderLayerforward(
         print('Layer: ', self.layer_idx)
         print("Input hidden states:", residual)
         print("Hidden states after LN:", hidden_states)
+        
     if self.layer_idx in layers:
-        torch.save(residual.cpu(), os.path.join(folder_to_save, f'layer_{self.layer_idx}_residual.pt'))
+        torch.save(residual.cpu(), os.path.join(folder_to_save, f'layer_{self.layer_idx}_input_hidden_states.pt'))
         torch.save(hidden_states.cpu(), os.path.join(folder_to_save, f'layer_{self.layer_idx}_hidden_states_after_ln.pt'))
         
-
     # Self Attention
     hidden_states, self_attn_weights, present_key_value = self.self_attn(
         hidden_states=hidden_states,
@@ -60,11 +60,6 @@ def DebugDecoderLayerforward(
         position_embeddings=position_embeddings,
         **kwargs,
     )
-    
-    if self.layer_idx in layers:  
-        print("Self Attention output:", hidden_states)
-    if self.layer_idx in layers:
-        torch.save(hidden_states.cpu(), os.path.join(folder_to_save, f'layer_{self.layer_idx}_self_attention_output.pt'))
 
     hidden_states = residual + hidden_states
 
@@ -106,7 +101,7 @@ def DebugSDPAforward(
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     # which layers and variables to print
     debug_arguments = {
-        'layers': [0,1,2], # layers to print
+        'layers': [i for i in range(10)], # layers to print
         'variables': [1,2,3,4], # variables to print
     }
         
@@ -185,8 +180,68 @@ def DebugSDPAforward(
 
     attn_output = self.o_proj(attn_output)
 
+    if self.layer_idx in layers:  
+        print("Self Attention output:", attn_output)
+    if self.layer_idx in layers:
+        torch.save(attn_output.cpu(), os.path.join(folder_to_save, f'layer_{self.layer_idx}_self_attention_output.pt'))
+
     return attn_output, None, past_key_value
 
+def get_cos_sin(seq_length, head_dim, base=500000.0):
+    assert head_dim%2==0
+    theta = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float().to(device) / head_dim))
+    position = torch.arange(seq_length).unsqueeze(1).to(device).float() # [seq_length, 1]
+    return torch.cos(position.float()*theta.float()).repeat(1,2), torch.sin(position.float()*theta.float()).repeat(1,2) # [seq_length, head_dim], [seq_length, head_dim]
+
+# The code looks messy. However, the conclusion is that the computing device will affect the result.
+@torch.no_grad()
+def DebugRoPEforward(self, x, position_ids):
+    if "dynamic" in self.rope_type:
+        self._dynamic_frequency_update(position_ids, device=x.device)
+        
+    import os 
+    folder_to_save = '/fsx/haojun/LLaMA/.cache/activation_values'
+    saved_my_theta = torch.load(os.path.join(folder_to_save, f'my_theta.pt'))
+    saved_inv_freq = torch.load(os.path.join(folder_to_save, f'inv_freq.pt'))
+    
+    # saved_my_theta != my theta lol. WTF ! 
+    base = 500000.0
+    head_dim = x.size(-1)
+    seq_length = position_ids.size(1)
+    device = x.device
+    my_theta_cpu = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float().to('cpu') / head_dim)) # =  self.inv_freq.cpu() 
+    my_theta_gpu = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float().to('cuda') / head_dim)) # != self.inv_freq
+    
+    # Core RoPE block
+    inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+    position_ids_expanded = position_ids[:, None, :].float()
+    # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
+    device_type = x.device.type
+    device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+    with torch.autocast(device_type=device_type, enabled=False):
+        freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos()
+        sin = emb.sin()
+
+    # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
+    cos = cos * self.attention_scaling
+    sin = sin * self.attention_scaling
+    
+    my_position = torch.arange(seq_length).unsqueeze(1).to(device).float() # [seq_length, 1]
+    my_cos, my_sin = torch.cos(my_position.float()* my_theta_cpu.to(device).float()).repeat(1,2), torch.sin(my_position.float()*my_theta_cpu.to(device).float()).repeat(1,2) #  = cos, sin
+    my_cos, my_sin = torch.cos(my_position.to('cpu').float()* my_theta_cpu.float()).repeat(1,2), torch.sin(my_position.to('cpu').float()*my_theta_cpu.float()).repeat(1,2) # != cos, sin
+    
+    if self.layer_idx == 0: 
+        print("RoPE cos:", cos)
+        print("RoPE sin:", sin)
+        folder_to_save = '/fsx/haojun/LLaMA/.cache/activation_values'
+        torch.save(cos.cpu(), os.path.join(folder_to_save, f'cos.pt'))
+        saved_cos = torch.load(os.path.join(folder_to_save, f'cos.pt'))
+        assert torch.equal(cos.cpu(), saved_cos), f"Save cos error."
+        torch.save(sin.cpu(), os.path.join(folder_to_save, f'sin.pt'))
+
+    return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
 
@@ -379,32 +434,6 @@ def DebugSDPAforward(
 #             outputs += (present_key_value,)
 
 #         return outputs
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

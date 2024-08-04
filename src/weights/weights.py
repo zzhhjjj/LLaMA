@@ -51,7 +51,7 @@ def copy_weights_to_model(model, all_tensors):
         (all_tensors['model.norm.weight'], model.layer_norm.weight)
     ]
     
-    is_merged_qkv_weight = os.getenv('is_merged_qkv_weight', '1')
+    is_merged_qkv_weight = os.getenv('MERGED_QKV_WEIGHT', '1')
     if is_merged_qkv_weight == '1':
         print(f"Using merged qkv weights: {is_merged_qkv_weight}")
     else:

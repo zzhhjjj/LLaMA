@@ -31,7 +31,7 @@ config = LLaMAConfig()
 model = LLaMA(config)
 
 ## load weights 
-weights_directory_path = "/fsx/haojun/LLaMA/.cache/models/Meta-Llama-3-8B"
+weights_directory_path = ".cache/models/Meta-Llama-3-8B"
 all_tensors = load_weights_to_dict(weights_directory_path)
 copy_weights_to_model(model, all_tensors)
 model.to(device)

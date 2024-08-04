@@ -21,7 +21,8 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 seed = 42
 torch.manual_seed(seed)
 
-os.environ['is_merged_qkv_weight'] = '1' # 1/0
+# to match the output of transformers model, set MERGED_QKV_WEIGHT to 0 is necessary
+os.environ['MERGED_QKV_WEIGHT'] = '0' # 1/0
 
 @dataclass
 class LLaMAConfig:
@@ -59,10 +60,11 @@ transformer_model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_o
 ## prompt
 input_text = "The future of AI is"
 inputs = tokenizer(input_text, return_tensors="pt").to(device)
-max_new_tokens = 200
+max_new_tokens = 20
 
-with RedirectOutput('/fsx/haojun/LLaMA/.cache/logs/output1.txt'):    # empty string for terminal output
+with RedirectOutput('/fsx/haojun/LLaMA/.cache/logs/seperate_qkv.txt'):    # empty string for terminal output
     ## generate text
+    print("MERGED_QKV_WEIGHT= ", os.environ['MERGED_QKV_WEIGHT'])
     for i in range(max_new_tokens):
         output_logits = transformer_model(**inputs)['logits']
         my_output_logits = model(**inputs, debug_arguments=None)
@@ -71,6 +73,7 @@ with RedirectOutput('/fsx/haojun/LLaMA/.cache/logs/output1.txt'):    # empty str
         # test logits and generation on the same time.
         try:
             torch.testing.assert_close(my_output_logits,output_logits,rtol=1e-5,atol=1e-5) # check if the output logits are close
+            assert torch.equal(my_output_logits,output_logits), "Output logits are not the same"
         except AssertionError as e:
             print(f'Token {i+1} failed: {e}')
             print("Reference: ",output_logits) 
