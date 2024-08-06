@@ -3,7 +3,9 @@ This script compare the output logits/generated token of my LLaMA model with the
 """
 
 import sys
+from src.model.debug_llama import DebugMyCausalSelfAttentionforward, DebugMyDecoderLayerforward, DebugMyLLaMAforward
 from src.model.llama3 import LLaMA
+from tools.debug.replace_attn import DebugDecoderLayerforward, DebugRoPEforward, DebugSDPAforward
 import torch 
 from dataclasses import dataclass
 from src.weights.weights import load_weights_to_dict, copy_weights_to_model
@@ -14,6 +16,9 @@ import lovely_tensors as lt
 lt.monkey_patch()
 from lovely_tensors import set_config
 set_config(precision=6)
+
+compare_activation_value = False # whether to compare each activation value(assert_close). Otherwise only compare the output logits.
+assert_equal = True # whether to assert each activation value is the same(torch.eq).
 
 # to match the output of transformers model, set MERGED_QKV_WEIGHT to 0 is necessary
 os.environ['DATA_TYPE'] = 'bfloat16' # bfloat16/float32
@@ -63,6 +68,30 @@ with timer("Load transformers model"):
     attn_implementation = 'sdpa' if os.getenv('ATTENTION', 'SDPA') == 'SDPA' else 'flash_attention_2'
     transformer_model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, torch_dtype=dtype, attn_implementation = attn_implementation).to(device)
 
+if compare_activation_value:
+    ## Replace the forward function of the transformer model. Save the activations
+    for i, layer in enumerate(transformer_model.model.layers):
+        layer.layer_idx = i
+        layer.forward = DebugDecoderLayerforward.__get__(layer, type(layer))
+        if os.getenv('ATTENTION', 'SDPA') == 'SDPA': # comparaison for Flash attention is not implemented yet
+            layer.self_attn.forward = DebugSDPAforward.__get__(layer.self_attn, type(layer.self_attn))
+        layer.self_attn.rotary_emb.layer_idx = i
+        layer.self_attn.rotary_emb.forward = DebugRoPEforward.__get__(layer.self_attn.rotary_emb, type(layer.self_attn.rotary_emb))
+    
+    # which decoder layers to compare
+    debug_arguments = {'layers': [i for i in range(10)], 'variables': [1,2,3,4]}
+    
+    ## Do the same for my model
+    model.forward = DebugMyLLaMAforward.__get__(model, type(model))
+    for i,layer in enumerate(model.layers):
+        layer.debug_arguments = debug_arguments
+        layer.assert_equal = False
+        layer.forward = DebugMyDecoderLayerforward.__get__(layer, type(layer))
+        if os.getenv('ATTENTION', 'SDPA') == 'SDPA': # comparaison for Flash attention is not implemented yet
+            layer.attention.debug_arguments = debug_arguments
+            layer.attention.assert_equal = False
+            layer.attention.forward = DebugMyCausalSelfAttentionforward.__get__(layer.attention, type(layer.attention))
+
 ## prompt
 input_text = "The future of AI is"
 inputs = tokenizer(input_text, return_tensors="pt").to(device)
@@ -77,7 +106,7 @@ with RedirectOutput(log_file_path):    # empty string for terminal output
     # generate text
     for i in range(max_new_tokens):
         output_logits = transformer_model(**inputs)['logits'].to(dtype) # output logits of transformer model is still in float32 even dtype is bfloat16
-        my_output_logits = model(**inputs, debug_arguments=None)
+        my_output_logits = model(**inputs)
         next_token_id = torch.argmax(output_logits[:, -1, :], dim=-1)
         my_next_token_id = torch.argmax(my_output_logits[:, -1, :], dim=-1)
         try:

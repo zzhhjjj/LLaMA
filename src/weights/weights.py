@@ -21,14 +21,19 @@ def load_weights_to_dict(path):
     # Get a list of all files in the directory
     files = [f for f in os.listdir(path) if f.endswith(".safetensors")]
 
-    # Iterate over all files in the directory with a progress bar
-    for filename in tqdm(files, desc="Loading weights"):
+    # Function to load a single file
+    def load_file(filename):
         file_path = os.path.join(path, filename)
         with safe_open(file_path, framework="pt") as f:
-            tensor_names = f.keys()
-            for name in tensor_names:
-                # Store each tensor in the dictionary
-                all_tensors[name] = f.get_tensor(name)
+            return {name: f.get_tensor(name) for name in f.keys()}
+
+    # Load all files concurrently
+    with ThreadPoolExecutor() as executor:
+        results = list(tqdm(executor.map(load_file, files), total=len(files), desc="Loading weights"))
+    
+    # Combine all results into a single dictionary
+    for result in results:
+        all_tensors.update(result)
     
     return all_tensors
 

@@ -70,7 +70,7 @@ class CausalSelfAttention(nn.Module):
         
         ## TODO support mask
     
-    def forward(self, x, cos, sin, attention_mask=None, debug_arguments=None):
+    def forward(self, x, cos, sin, attention_mask=None):
         batch_size, seq_length, hidden_dim = x.size()
         if self.is_merged_qkv_weight == '1':
             qkv = self.qkv_proj(x) # [batch_size, seq_length, num_heads*head_dim + 2*num_key_values*head_dim]
@@ -123,7 +123,6 @@ class LLaMAMLP(nn.Module):
         super().__init__()
         self.merged_gate_up = os.getenv('MERGED_GATE_UP_WEIGHT', '1') == '1'
         if self.merged_gate_up:
-            print("Using merged gate and up projection weights")
             self.gate_up_proj = nn.Linear(config.hidden_dim, config.intermediate_dim*2, bias=False)
         else:
             self.up_proj = nn.Linear(config.hidden_dim, config.intermediate_dim, bias=False)
@@ -146,8 +145,8 @@ class DecoderLayer(nn.Module):
         self.mlp = LLaMAMLP(config)
         self.layer_idx = layer_idx
 
-    def forward(self, x, cos, sin, attention_mask = None, debug_arguments = None):
-        x = x + self.attention(self.input_layernorm(x),cos,sin, debug_arguments = debug_arguments) # Attention 
+    def forward(self, x, cos, sin, attention_mask = None):
+        x = x + self.attention(self.input_layernorm(x),cos,sin) # Attention 
         x = x + self.mlp(self.post_attention_layernorm(x)) # MLP
         return x
     
@@ -179,7 +178,7 @@ class LLaMA(nn.Module):
     def init_rope(self,rope_theta = 500000.0):
         self.cos, self.sin = get_cos_sin(self.max_position_embeddings, self.head_dim, base = rope_theta) # [max_position_embeddings, head_dim]
         
-    def forward(self, input_ids, attention_mask, debug_arguments=None):
+    def forward(self, input_ids, attention_mask):
         batch_size, seq_length = input_ids.size()
         x = self.word_embedding(input_ids)
         cos, sin = self.cos[:seq_length], self.sin[:seq_length]
