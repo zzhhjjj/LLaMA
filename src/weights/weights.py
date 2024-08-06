@@ -50,13 +50,7 @@ def copy_weights_to_model(model, all_tensors):
         (all_tensors['lm_head.weight'], model.lm_head.weight),
         (all_tensors['model.norm.weight'], model.layer_norm.weight)
     ]
-    
-    is_merged_qkv_weight = os.getenv('MERGED_QKV_WEIGHT', '1')
-    if is_merged_qkv_weight == '1':
-        print(f"Using merged qkv weights: {is_merged_qkv_weight}")
-    else:
-        print("Using seperate qkv weights")
-        
+   
     num_layers = 32
     for i in range(num_layers):
         # LayerNorm
@@ -64,13 +58,21 @@ def copy_weights_to_model(model, all_tensors):
         tasks.append((all_tensors[f'model.layers.{i}.post_attention_layernorm.weight'], model.layers[i].post_attention_layernorm.weight))
         
         # MLP
-        tasks.append((all_tensors[f'model.layers.{i}.mlp.up_proj.weight'], model.layers[i].mlp.up_proj.weight))
-        tasks.append((all_tensors[f'model.layers.{i}.mlp.gate_proj.weight'], model.layers[i].mlp.gate_proj.weight))
+        if os.getenv('MERGED_GATE_UP_WEIGHT', '1') == '1':
+            # merge gate and up projection weights
+            merged_gate_up_weight = torch.cat([
+                all_tensors[f'model.layers.{i}.mlp.gate_proj.weight'],
+                all_tensors[f'model.layers.{i}.mlp.up_proj.weight']
+            ], dim=0)
+            tasks.append((merged_gate_up_weight, model.layers[i].mlp.gate_up_proj.weight))
+        else:
+            tasks.append((all_tensors[f'model.layers.{i}.mlp.up_proj.weight'], model.layers[i].mlp.up_proj.weight))
+            tasks.append((all_tensors[f'model.layers.{i}.mlp.gate_proj.weight'], model.layers[i].mlp.gate_proj.weight))
         tasks.append((all_tensors[f'model.layers.{i}.mlp.down_proj.weight'], model.layers[i].mlp.down_proj.weight))
         
         # Attention
-        if is_merged_qkv_weight == '1':
-            ## merged qkv weights
+        if os.getenv('MERGED_QKV_WEIGHT', '1') == '1':
+            # merged qkv weights
             merged_qkv_weight = torch.cat([
                 all_tensors[f'model.layers.{i}.self_attn.q_proj.weight'],
                 all_tensors[f'model.layers.{i}.self_attn.k_proj.weight'],
@@ -78,7 +80,7 @@ def copy_weights_to_model(model, all_tensors):
             ], dim=0)
             tasks.append((merged_qkv_weight, model.layers[i].attention.qkv_proj.weight))
         else:
-            ## Seperate qkv weights
+            # Seperate qkv weights
             tasks.append((all_tensors[f'model.layers.{i}.self_attn.q_proj.weight'], model.layers[i].attention.q_proj.weight))
             tasks.append((all_tensors[f'model.layers.{i}.self_attn.k_proj.weight'], model.layers[i].attention.k_proj.weight))
             tasks.append((all_tensors[f'model.layers.{i}.self_attn.v_proj.weight'], model.layers[i].attention.v_proj.weight))

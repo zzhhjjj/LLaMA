@@ -1,22 +1,16 @@
+from contextlib import contextmanager
+import os
 import sys
 from functools import wraps
+import time
 
-def redirect_output(file_path):
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            with open(file_path, 'w') as f:
-                # Redirect stdout and stderr to the file
-                sys.stdout = f
-                sys.stderr = f
-                try:
-                    return func(*args, **kwargs)
-                finally:
-                    # Reset stdout and stderr to default values
-                    sys.stdout = sys.__stdout__
-                    sys.stderr = sys.__stderr__
-        return wrapper
-    return decorator
+@contextmanager
+def timer(name):
+    start_time = time.time()
+    yield
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"{name} took {elapsed_time:.2f} seconds to execute")
 
 class RedirectOutput:
     def __init__(self, file_path):
@@ -35,3 +29,18 @@ class RedirectOutput:
             sys.stdout = self._stdout
             sys.stderr = self._stderr
             self.f.close()
+
+def print_env_variables():
+    print("MERGED_QKV_WEIGHT= ", os.getenv('MERGED_QKV_WEIGHT', '1'))
+    print("MERGED_GATE_UP_WEIGHT= ", os.getenv('MERGED_GATE_UP_WEIGHT', '1'))
+    print("DATA_TYPE= ", os.getenv('DATA_TYPE', 'bfloat16'))
+    print("Attention= ", os.getenv('ATTENTION', 'SDPA'))
+    
+def get_log_file_path():
+    path = '/fsx/haojun/LLaMA/.cache/logs'
+    file_name = ''
+    file_name += 'merged_qkv' if os.getenv('MERGED_QKV_WEIGHT', '1') == '1' else 'seperate_qkv'
+    file_name += '_merged_gate_up' if os.getenv('MERGED_GATE_UP_WEIGHT', '1') == '1' else '_seperate_gate_up'
+    file_name += '_sdpa' if os.getenv('ATTENTION', 'SDPA') == 'SDPA' else '_flash'
+    file_name += '_bf16' if os.getenv('DATA_TYPE', 'bfloat16') == 'bfloat16' else '_fp32'
+    return os.path.join(path, file_name + '.txt')

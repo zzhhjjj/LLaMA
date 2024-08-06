@@ -12,6 +12,7 @@ from lovely_tensors import set_config
 lt.monkey_patch()
 set_config(precision=6)
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+dtype = torch.bfloat16 if os.getenv('DATA_TYPE', 'bfloat16') == 'bfloat16' else torch.float32
 
 
 def apply_rotary_pos_emb(x, cos, sin):
@@ -27,12 +28,12 @@ def apply_rotary_pos_emb(x, cos, sin):
 def get_cos_sin(seq_length, head_dim, base=500000.0):
     assert head_dim%2==0
     # Results on CUDA and CPU are different even with the same formula
-    # To match transformers implementation. frequency should computed be on CPU
+    # To match transformers implementation. frequency should be computed on CPU
     theta = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float().to('cpu') / head_dim))
     position = torch.arange(seq_length).unsqueeze(1).to(device).float() # [seq_length, 1]
-    # To match transformers implementation. m * theta should be on GPU
+    # To match transformers implementation. m * theta should be computed on GPU
     theta = theta.to(device)
-    return torch.cos(position.float()*theta.float()).repeat(1,2), torch.sin(position.float()*theta.float()).repeat(1,2) # [seq_length, head_dim], [seq_length, head_dim]
+    return torch.cos(position.float()*theta.float()).to(dtype).repeat(1,2), torch.sin(position.float()*theta.float()).to(dtype).repeat(1,2) # [seq_length, head_dim], [seq_length, head_dim]
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
@@ -188,11 +189,19 @@ class LlamaRMSNorm(nn.Module):
 class LLaMAMLP(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
-        self.up_proj = nn.Linear(config.hidden_dim, config.intermediate_dim, bias=False)
-        self.gate_proj = nn.Linear(config.hidden_dim, config.intermediate_dim, bias=False)
+        self.merged_gate_up = os.getenv('MERGED_GATE_UP_WEIGHT', '1') == '1'
+        if self.merged_gate_up:
+            print("Using merged gate and up projection weights")
+            self.gate_up_proj = nn.Linear(config.hidden_dim, config.intermediate_dim*2, bias=False)
+        else:
+            self.up_proj = nn.Linear(config.hidden_dim, config.intermediate_dim, bias=False)
+            self.gate_proj = nn.Linear(config.hidden_dim, config.intermediate_dim, bias=False)
         self.down_proj = nn.Linear(config.intermediate_dim, config.hidden_dim, bias=False)
         
     def forward(self, x):
+        if  self.merged_gate_up:
+            gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
+            return self.down_proj(F.silu(gate) * up)
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 class DecoderLayer(nn.Module):

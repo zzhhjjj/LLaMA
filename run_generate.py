@@ -1,3 +1,4 @@
+import os
 from src.model.llama3 import LLaMA
 import torch 
 from dataclasses import dataclass
@@ -6,7 +7,15 @@ import torch.nn.functional as F
 from src.weights.weights import load_weights_to_dict, copy_weights_to_model
 from transformers import AutoTokenizer
 
+# to match the output of transformers model, set MERGED_QKV_WEIGHT to 0 is necessary
+os.environ['DATA_TYPE'] = 'bfloat16' # bfloat16/float32
+os.environ['MERGED_QKV_WEIGHT'] = '0' # 1/0
+os.environ['MERGED_GATE_UP_WEIGHT'] = '0' # 1/0
+os.environ['ATTENTION'] = 'FLASH' # SDPA/FLASH
+
+# set device and dtype
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+dtype = torch.bfloat16 if os.getenv('DATA_TYPE', 'bfloat16') == 'bfloat16' else torch.float32
 
 # Set the seed for reproducibility
 seed = 42
@@ -34,7 +43,7 @@ model = LLaMA(config)
 weights_directory_path = ".cache/models/Meta-Llama-3-8B"
 all_tensors = load_weights_to_dict(weights_directory_path)
 copy_weights_to_model(model, all_tensors)
-model.to(device)
+model.to(dtype).to(device)
 
 ## Tokenizer
 pretrained_model_name_or_path = 'meta-llama/Meta-Llama-3-8B'

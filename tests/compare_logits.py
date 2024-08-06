@@ -17,13 +17,19 @@ lt.monkey_patch()
 from lovely_tensors import set_config
 set_config(precision=6)
 
+# set device and dtype
+os.environ['DATA_TYPE'] = 'bfloat16' # bfloat16/float32
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+dtype = torch.bfloat16 if os.getenv('DATA_TYPE', 'bfloat16') == 'bfloat16' else torch.float32
 
 # Set the seed for reproducibility
 seed = 42
 torch.manual_seed(seed)
 
+# to match the output of transformers model, set MERGED_QKV_WEIGHT to 0 is necessary
 os.environ['MERGED_QKV_WEIGHT'] = '0' # 1/0
+os.environ['MERGED_GATE_UP_WEIGHT'] = '0' # 1/0
+
 
 @dataclass
 class LLaMAConfig:
@@ -47,7 +53,7 @@ model = DebugLLaMA(config)
 weights_directory_path = "/fsx/haojun/LLaMA/.cache/models/Meta-Llama-3-8B"
 all_tensors = load_weights_to_dict(weights_directory_path)
 copy_weights_to_model(model, all_tensors)
-model.to(device)
+model = model.to(dtype).to(device)
 
 ## Tokenizer
 pretrained_model_name_or_path = 'meta-llama/Meta-Llama-3-8B'
@@ -55,7 +61,7 @@ tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
 tokenizer.pad_token = tokenizer.eos_token
 
 ## Reference model
-transformer_model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, attn_implementation = 'sdpa').to(device)
+transformer_model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, torch_dtype=dtype, attn_implementation = 'sdpa').to(device)
 # transformer_model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2").to(device)
 
 ## Replace the forward function of the transformer model. 

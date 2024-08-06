@@ -8,7 +8,9 @@ from flash_attn.flash_attn_interface import flash_attn_func
 import lovely_tensors as lt
 from lovely_tensors import set_config
 set_config(precision=6)
+
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+dtype = torch.bfloat16 if os.getenv('DATA_TYPE', 'bfloat16') == 'bfloat16' else torch.float32
 
 def apply_rotary_pos_emb(x, cos, sin):
     batch_size, num_head, seq_length, head_dim = x.size()
@@ -28,18 +30,7 @@ def get_cos_sin(seq_length, head_dim, base=500000.0):
     position = torch.arange(seq_length).unsqueeze(1).to(device).float() # [seq_length, 1]
     # To match transformers implementation. m * theta should be computed on GPU
     theta = theta.to(device)
-    return torch.cos(position.float()*theta.float()).repeat(1,2), torch.sin(position.float()*theta.float()).repeat(1,2) # [seq_length, head_dim], [seq_length, head_dim]
-
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+    return torch.cos(position.float()*theta.float()).to(dtype).repeat(1,2), torch.sin(position.float()*theta.float()).to(dtype).repeat(1,2) # [seq_length, head_dim], [seq_length, head_dim]
 
 def flash_attention(q, k, v):
     q = q.permute(0, 2, 1, 3) # [batch_size, seq_length, num_head , head_dim]
@@ -92,21 +83,22 @@ class CausalSelfAttention(nn.Module):
                 dim=-1,
             )
         else:
-            q = self.q_proj(x)
-            k = self.k_proj(x)
-            v = self.v_proj(x)
+            q = self.q_proj(x) # [batch_size, seq_length, num_heads*head_dim]
+            k = self.k_proj(x) # [batch_size, seq_length, num_key_values*head_dim]
+            v = self.v_proj(x) # [batch_size, seq_length, num_key_values*head_dim]
         q = q.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2) # [batch_size, num_heads, seq_length, head_dim]
         k = k.view(batch_size, seq_length, self.num_key_values, self.head_dim).transpose(1, 2) # [batch_size, num_key_values, seq_length, head_dim]
         v = v.view(batch_size, seq_length, self.num_key_values, self.head_dim).transpose(1, 2) # [batch_size, num_key_values, seq_length, head_dim]
         q = apply_rotary_pos_emb(q, cos, sin)
         k = apply_rotary_pos_emb(k, cos, sin)
-        # k = k.repeat_interleave(self.num_heads // self.num_key_values, dim=1) # [batch_size, num_heads, seq_length, head_dim]
-        # v = v.repeat_interleave(self.num_heads // self.num_key_values, dim=1) # [batch_size, num_heads, seq_length, head_dim]
-        k = repeat_kv(k,self.num_heads // self.num_key_values)
-        v = repeat_kv(v,self.num_heads // self.num_key_values)
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True) # [batch_size, num_heads, seq_length, head_dim]
-        # out = flash_attention(q, k, v) # [batch_size, num_heads, seq_length, head_dim] 
-        out = out.transpose(1, 2).reshape(batch_size, seq_length, self.num_heads * self.head_dim) # [batch_size, seq_length, hidden_dim]
+        k = k.repeat_interleave(self.num_heads // self.num_key_values, dim=1) # [batch_size, num_heads, seq_length, head_dim]
+        v = v.repeat_interleave(self.num_heads // self.num_key_values, dim=1) # [batch_size, num_heads, seq_length, head_dim]
+        if os.getenv('ATTENTION', 'SDPA') == 'SDPA':
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=True) # [batch_size, num_heads, seq_length, head_dim]
+            out = out.transpose(1, 2) # [batch_size, seq_length, num_heads, head_dim]
+        else:
+            out = flash_attention(q, k, v) # [batch_size, seq_length, num_heads, head_dim] 
+        out = out.reshape(batch_size, seq_length, self.num_heads * self.head_dim) # [batch_size, seq_length, hidden_dim]
         out = self.out_proj(out) # [batch_size, seq_length, hidden_dim]
         return out
 
@@ -129,11 +121,19 @@ class LlamaRMSNorm(nn.Module):
 class LLaMAMLP(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
-        self.up_proj = nn.Linear(config.hidden_dim, config.intermediate_dim, bias=False)
-        self.gate_proj = nn.Linear(config.hidden_dim, config.intermediate_dim, bias=False)
+        self.merged_gate_up = os.getenv('MERGED_GATE_UP_WEIGHT', '1') == '1'
+        if self.merged_gate_up:
+            print("Using merged gate and up projection weights")
+            self.gate_up_proj = nn.Linear(config.hidden_dim, config.intermediate_dim*2, bias=False)
+        else:
+            self.up_proj = nn.Linear(config.hidden_dim, config.intermediate_dim, bias=False)
+            self.gate_proj = nn.Linear(config.hidden_dim, config.intermediate_dim, bias=False)
         self.down_proj = nn.Linear(config.intermediate_dim, config.hidden_dim, bias=False)
         
     def forward(self, x):
+        if  self.merged_gate_up:
+            gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
+            return self.down_proj(F.silu(gate) * up)
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 class DecoderLayer(nn.Module):
