@@ -1,4 +1,3 @@
-# %%
 import os
 import torch 
 from dataclasses import dataclass
@@ -178,7 +177,7 @@ class LLaMA(nn.Module):
     def init_rope(self,rope_theta = 500000.0):
         self.cos, self.sin = get_cos_sin(self.max_position_embeddings, self.head_dim, base = rope_theta) # [max_position_embeddings, head_dim]
         
-    def forward(self, input_ids, attention_mask):
+    def forward(self, input_ids, attention_mask=None):
         batch_size, seq_length = input_ids.size()
         x = self.word_embedding(input_ids)
         cos, sin = self.cos[:seq_length], self.sin[:seq_length]
@@ -188,5 +187,4 @@ class LLaMA(nn.Module):
         logits = self.lm_head(x)
         
         return logits  # [batch_size, seq_length, vocab_size]
-# %%
 

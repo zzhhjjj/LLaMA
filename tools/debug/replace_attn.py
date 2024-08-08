@@ -1,5 +1,4 @@
 import os
-from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch 
 import lovely_tensors as lt; lt.monkey_patch()
 from lovely_tensors import set_config
@@ -7,7 +6,7 @@ set_config(precision=6)
 from typing import Optional, Tuple
 from transformers.cache_utils import Cache
 from transformers.models.llama.configuration_llama import LlamaConfig
-from transformers.models.llama.modeling_llama import repeat_kv, apply_rotary_pos_emb, LlamaSdpaAttention, LlamaDecoderLayer
+from transformers.models.llama.modeling_llama import repeat_kv, apply_rotary_pos_emb
 import torch.nn as nn
 from tqdm import tqdm
 

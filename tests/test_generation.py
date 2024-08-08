@@ -3,7 +3,7 @@ This script compare the output logits/generated token of my LLaMA model with the
 """
 
 import sys
-from src.model.debug_llama import DebugMyCausalSelfAttentionforward, DebugMyDecoderLayerforward, DebugMyLLaMAforward
+from tools.debug.debug_llama import DebugMyCausalSelfAttentionforward, DebugMyDecoderLayerforward, DebugMyLLaMAforward
 from src.model.llama3 import LLaMA
 from tools.debug.replace_attn import DebugDecoderLayerforward, DebugRoPEforward, DebugSDPAforward
 import torch 
