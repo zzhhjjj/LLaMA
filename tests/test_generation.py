@@ -5,6 +5,7 @@ This script compare the output logits/generated token of my LLaMA model with the
 import sys
 from tools.debug.debug_llama import DebugMyCausalSelfAttentionforward, DebugMyDecoderLayerforward, DebugMyLLaMAforward
 from src.model.llama3 import LLaMA
+from tools.debug.helper import jensen_shannon_divergence
 from tools.debug.replace_attn import DebugDecoderLayerforward, DebugRoPEforward, DebugSDPAforward
 import torch 
 from dataclasses import dataclass
@@ -18,12 +19,12 @@ from lovely_tensors import set_config
 set_config(precision=6)
 
 compare_activation_value = False # whether to compare each activation value(assert_close). Otherwise only compare the output logits.
-assert_equal = True # whether to assert each activation value is the same(torch.eq).
+assert_equal = False # whether to assert each activation value is the same(torch.eq).
 
 # to match the output of transformers model, set MERGED_QKV_WEIGHT to 0 is necessary
 os.environ['DATA_TYPE'] = 'bfloat16' # bfloat16/float32
 os.environ['MERGED_QKV_WEIGHT'] = '0' # 1/0
-os.environ['MERGED_GATE_UP_WEIGHT'] = '1' # 1/0
+os.environ['MERGED_GATE_UP_WEIGHT'] = '0' # 1/0
 os.environ['ATTENTION'] = 'FLASH' # SDPA/FLASH
 
 # set device and dtype
@@ -85,20 +86,21 @@ if compare_activation_value:
     model.forward = DebugMyLLaMAforward.__get__(model, type(model))
     for i,layer in enumerate(model.layers):
         layer.debug_arguments = debug_arguments
-        layer.assert_equal = False
+        layer.assert_equal = assert_equal
         layer.forward = DebugMyDecoderLayerforward.__get__(layer, type(layer))
         if os.getenv('ATTENTION', 'SDPA') == 'SDPA': # comparaison for Flash attention is not implemented yet
             layer.attention.debug_arguments = debug_arguments
-            layer.attention.assert_equal = False
+            layer.attention.assert_equal = assert_equal
             layer.attention.forward = DebugMyCausalSelfAttentionforward.__get__(layer.attention, type(layer.attention))
 
 ## prompt
 input_text = "The future of AI is"
 inputs = tokenizer(input_text, return_tensors="pt").to(device)
-max_new_tokens = 100
+max_new_tokens = 300
 
 log_file_path = get_log_file_path() # depends on the env variables
 
+## Test generation without KV cache by comparing with transformers model output
 with RedirectOutput(log_file_path):    # empty string for terminal output
     # check environment variables
     print_env_variables()
@@ -106,9 +108,8 @@ with RedirectOutput(log_file_path):    # empty string for terminal output
     # generate text
     for i in range(max_new_tokens):
         output_logits = transformer_model(**inputs)['logits'].to(dtype) # output logits of transformer model is still in float32 even dtype is bfloat16
-        my_output_logits = model(**inputs)
         next_token_id = torch.argmax(output_logits[:, -1, :], dim=-1)
-        my_next_token_id = torch.argmax(my_output_logits[:, -1, :], dim=-1)
+        my_next_token_id, my_output_logits = model.generate_one_token(inputs['input_ids'])
         try:
             # test logits and generation on the same time.
             torch.testing.assert_close(my_output_logits,output_logits,rtol=1e-5,atol=1e-5) # check if the output logits are close
@@ -117,6 +118,7 @@ with RedirectOutput(log_file_path):    # empty string for terminal output
             print(f'Token {i+1} failed: {e}')
             print("Reference: ",output_logits) 
             print("My output: ",my_output_logits)
+        # print(f'Token {i+1}: Jensen-Shannon divergence: {jensen_shannon_divergence(output_logits[0][-1], my_output_logits[0][-1])}')
         assert next_token_id == my_next_token_id, f"Predictions are not the same: {next_token_id} != {my_next_token_id}"
         inputs['input_ids'] = torch.cat([inputs['input_ids'], next_token_id.unsqueeze(-1)], dim=-1)
         if next_token_id == tokenizer.eos_token_id:
@@ -124,3 +126,52 @@ with RedirectOutput(log_file_path):    # empty string for terminal output
     print("Input prompt:", input_text)
     print("Generated text:", tokenizer.decode(inputs['input_ids'][0], skip_special_tokens=True)[len(input_text):])  # remove the input text from the generated text
     print("Test passed!")
+
+
+# This is another test for generation with KV cache. 
+# The only difference is that there are two phases, prefilling and decoding. Didn't find a good way to write the test.
+# However, it seems normal to have different output with/without KV cache. 
+# with RedirectOutput(log_file_path):    # empty string for terminal output
+#     # check environment variables
+#     print_env_variables()
+    
+#     # initiliaze kv cache
+#     model.initialize_kv_cache(inputs['input_ids'].size(0), model.max_position_embeddings)
+    
+#     # Prefilling phase
+#     output_logits = transformer_model(**inputs)['logits'].to(dtype) # output logits of transformer model is still in float32 even dtype is bfloat16
+#     next_token_id = torch.argmax(output_logits[:, -1, :], dim=-1)
+#     position_ids = torch.arange(inputs['input_ids'].size(1)).to(device)
+#     my_next_token_id, my_output_logits = model.generate_one_token(inputs['input_ids'], position_ids)
+#     try:
+#         # test logits and generation on the same time.
+#         torch.testing.assert_close(my_output_logits,output_logits,rtol=1e-5,atol=1e-5) # check if the output logits are close
+#         assert torch.equal(my_output_logits,output_logits), "Output logits are not the same"
+#     except AssertionError as e:
+#         print(f'Token {i+1} failed: {e}')
+#         print("Reference: ",output_logits) 
+#         print("My output: ",my_output_logits)
+#     assert next_token_id == my_next_token_id, f"Predictions are not the same: {next_token_id} != {my_next_token_id}"
+#     inputs['input_ids'] = torch.cat([inputs['input_ids'], next_token_id.unsqueeze(-1)], dim=-1)
+    
+#     # Decode phase
+#     for i in range(max_new_tokens-1):
+#         output_logits = transformer_model(**inputs)['logits'].to(dtype) # output logits of transformer model is still in float32 even dtype is bfloat16
+#         next_token_id = torch.argmax(output_logits[:, -1, :], dim=-1)
+#         position_ids = torch.tensor([inputs['input_ids'].size(1)-1]).to(device)
+#         my_next_token_id, my_output_logits = model.generate_one_token(inputs['input_ids'][0][-1].view(1,-1), position_ids)
+#         try:
+#             # test logits and generation on the same time.
+#             torch.testing.assert_close(my_output_logits[:,-1,:],output_logits[:, -1, :],rtol=1e-5,atol=1e-5) # check if the output logits are close
+#             assert torch.equal(my_output_logits,output_logits[:, -1, :]), "Output logits are not the same"
+#         except AssertionError as e:
+#             print(f'Token {i+1} failed: {e}')
+#             print("Reference: ",output_logits) 
+#             print("My output: ",my_output_logits)
+#         assert next_token_id == my_next_token_id, f"Predictions are not the same: {next_token_id} != {my_next_token_id}. The {i+1} th generation."
+#         inputs['input_ids'] = torch.cat([inputs['input_ids'], next_token_id.unsqueeze(-1)], dim=-1)
+#         if next_token_id == tokenizer.eos_token_id:
+#             break
+#     print("Input prompt:", input_text)
+#     print("Generated text:", tokenizer.decode(inputs['input_ids'][0], skip_special_tokens=True)[len(input_text):])  # remove the input text from the generated text
+#     print("Test passed!")

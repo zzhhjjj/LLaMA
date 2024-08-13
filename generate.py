@@ -53,15 +53,8 @@ tokenizer.pad_token = tokenizer.eos_token
 ## generation
 input_text = "The future of AI is"
 inputs = tokenizer(input_text, return_tensors="pt").to(device)
-max_new_tokens = 50
-
-for i in range(max_new_tokens):
-    output_logits = model(**inputs, debug_arguments=None)
-    next_token_logits = output_logits[:, -1, :]
-    next_token_id = torch.argmax(next_token_logits, dim=-1)
-    inputs['input_ids'] = torch.cat([inputs['input_ids'], next_token_id.unsqueeze(-1)], dim=-1)
-    if next_token_id == tokenizer.eos_token_id:
-        break
+max_new_tokens = 300
+inputs['input_ids']= model.generate(inputs['input_ids'], max_new_tokens=max_new_tokens, use_cache=True)
 
 print("Input prompt:", input_text)
 print("Generated text:", tokenizer.decode(inputs['input_ids'][0], skip_special_tokens=True)[len(input_text):])  # remove the input text from the generated text
