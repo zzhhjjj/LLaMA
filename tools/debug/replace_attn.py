@@ -26,7 +26,7 @@ def DebugDecoderLayerforward(
     
     # add debug code here
     debug_arguments = {
-        'layers': [i for i in range(10)], # layers to print
+        'layers': [i for i in range(32)], # layers to print
         'variables': [1,2,3,4], # variables to print
     }
     folder_to_save = '/fsx/haojun/LLaMA/.cache/activation_values'
@@ -100,7 +100,7 @@ def DebugSDPAforward(
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     # which layers and variables to print
     debug_arguments = {
-        'layers': [i for i in range(10)], # layers to print
+        'layers': [i for i in range(32)], # layers to print
         'variables': [1,2,3,4], # variables to print
     }
         

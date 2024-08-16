@@ -130,7 +130,7 @@ with RedirectOutput(log_file_path):    # empty string for terminal output
 
 # This is another test for generation with KV cache. 
 # The only difference is that there are two phases, prefilling and decoding. Didn't find a good way to write the test.
-# However, it seems normal to have different output with/without KV cache. 
+## It seems normal to have different output with/without KV cache. Didn't manage to match the output yet. 
 # with RedirectOutput(log_file_path):    # empty string for terminal output
 #     # check environment variables
 #     print_env_variables()
