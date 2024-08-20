@@ -18,7 +18,8 @@ from src.data.data import tokenize_dataset, get_dataloader
 os.environ['DATA_TYPE'] = 'bfloat16' # bfloat16/float32
 os.environ['MERGED_QKV_WEIGHT'] = '0' # 1/0
 os.environ['MERGED_GATE_UP_WEIGHT'] = '1' # 1/0
-os.environ['TRITONRMSNORM'] = '0'
+os.environ['TRITONRMSNORM'] = '1'
+os.environ['FLASH_ROPE'] = '1'
 os.environ['ATTENTION'] = 'FLASH' # SDPA/FLASH
 
 # set device and dtype
@@ -41,7 +42,7 @@ class LLaMAConfig:
     max_position_embeddings: int = sequence_length
     hidden_dim: int = 768
     intermediate_dim: int = 3072
-    vocab_size = 50257 # 50304 # https://x.com/karpathy/status/1621578354024677377 still true? 
+    vocab_size = 50304 #  https://x.com/karpathy/status/1621578354024677377 still true? 
     num_key_values: int = 4
     num_heads: int = 12
     num_layers: int = 12
@@ -60,7 +61,7 @@ dataloader = get_dataloader(tokenized_dataset, batch_size, shuffle)
 config = LLaMAConfig()
 model = LLaMA(config).to(dtype).to(device)
 criterion = nn.CrossEntropyLoss()  # or any other suitable loss function
-optimizer = optim.Adam(model.parameters(), lr=5e-4)
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
 # Training loop
 step = 0
