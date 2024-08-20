@@ -1,10 +1,12 @@
 import os
 from src.generation.decode import KVcache
+from src.nn.layer_norm import LlamaRMSNorm, TritonRMSNorm
 import torch 
 from dataclasses import dataclass
 import torch.nn as nn
 import torch.nn.functional as F
 from flash_attn.flash_attn_interface import flash_attn_func
+from flash_attn.layers.rotary import apply_rotary_emb
 import lovely_tensors as lt
 from lovely_tensors import set_config
 set_config(precision=6)
@@ -63,6 +65,8 @@ class CausalSelfAttention(nn.Module):
             self.q_proj = nn.Linear(config.hidden_dim, self.num_heads*self.head_dim, bias=False)
             self.k_proj = nn.Linear(config.hidden_dim, self.num_key_values*self.head_dim, bias=False)
             self.v_proj = nn.Linear(config.hidden_dim, self.num_key_values*self.head_dim, bias=False)
+        # if os.getenv('FLASH_ROPE', '1') == '1':
+        #     self.flash_rope = FlashRotaryEmbedding(dim=self.head_dim, interleaved=False, base=500000.0)
         self.out_proj = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
         self.kv_cache = None
         self.layer_idx = layer_idx
@@ -85,11 +89,20 @@ class CausalSelfAttention(nn.Module):
             q = self.q_proj(x) # [batch_size, seq_length, num_heads*head_dim]
             k = self.k_proj(x) # [batch_size, seq_length, num_key_values*head_dim]
             v = self.v_proj(x) # [batch_size, seq_length, num_key_values*head_dim]
-        q = q.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2) # [batch_size, num_heads, seq_length, head_dim]
-        k = k.view(batch_size, seq_length, self.num_key_values, self.head_dim).transpose(1, 2) # [batch_size, num_key_values, seq_length, head_dim]
-        v = v.view(batch_size, seq_length, self.num_key_values, self.head_dim).transpose(1, 2) # [batch_size, num_key_values, seq_length, head_dim]
-        q = apply_rotary_pos_emb(q, cos, sin)
-        k = apply_rotary_pos_emb(k, cos, sin)
+        if os.getenv('FLASH_ROPE', '1') != '1':
+            q = q.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2)       # [batch_size, num_heads, seq_length, head_dim]
+            k = k.view(batch_size, seq_length, self.num_key_values, self.head_dim).transpose(1, 2)  # [batch_size, num_key_values, seq_length, head_dim]
+            v = v.view(batch_size, seq_length, self.num_key_values, self.head_dim).transpose(1, 2)  # [batch_size, num_key_values, seq_length, head_dim]
+            q = apply_rotary_pos_emb(q, cos, sin)
+            k = apply_rotary_pos_emb(k, cos, sin)
+        else:
+            q = q.view(batch_size, seq_length, self.num_heads, self.head_dim)       # [batch_size, seq_length, num_heads, head_dim]
+            k = k.view(batch_size, seq_length, self.num_key_values, self.head_dim)  # [batch_size, seq_length, num_key_values, head_dim]
+            q = apply_rotary_emb(q,cos[:, :self.head_dim // 2], sin[:, :self.head_dim // 2],interleaved=False) # [batch_size, seq_length, num_heads, head_dim]
+            k = apply_rotary_emb(k,cos[:, :self.head_dim // 2], sin[:, :self.head_dim // 2],interleaved=False) # [batch_size, seq_length, num_key_values, head_dim]
+            q = q.transpose(1, 2)                                                                   # [batch_size, num_heads, seq_length, head_dim]
+            k = k.transpose(1, 2)                                                                   # [batch_size, num_key_values, seq_length, head_dim]
+            v = v.view(batch_size, seq_length, self.num_key_values, self.head_dim).transpose(1,2)   # [batch_size, num_key_values, seq_length, head_dim]
         if self.kv_cache is not None:
             # update kv_cache, and get stored k, v
             assert position_ids is not None, "position_ids should be provided to update kv_cache"
@@ -107,21 +120,6 @@ class CausalSelfAttention(nn.Module):
         out = self.out_proj(out) # [batch_size, seq_length, hidden_dim]
         return out
 
-class LlamaRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-5):
-        """
-        LlamaRMSNorm is equivalent to T5LayerNorm
-        """
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
 
 class LLaMAMLP(nn.Module):
     def __init__(self, config) -> None:
@@ -144,8 +142,12 @@ class DecoderLayer(nn.Module):
     # RMSNorm -> Attention -> Residual -> RMSNorm -> MLP -> Residual
     def __init__(self, config, layer_idx):
         super().__init__()
-        self.input_layernorm = LlamaRMSNorm(config.hidden_dim)
-        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_dim)
+        if os.getenv('TRITONRMSNORM', '1') == '1':
+            RMSNorm = TritonRMSNorm
+        else:
+            RMSNorm = LlamaRMSNorm
+        self.input_layernorm = RMSNorm(config.hidden_dim)
+        self.post_attention_layernorm = RMSNorm(config.hidden_dim)
         self.attention = CausalSelfAttention(config, layer_idx = layer_idx)
         self.mlp = LLaMAMLP(config)
         self.layer_idx = layer_idx
@@ -175,7 +177,7 @@ class LLaMA(nn.Module):
         self.word_embedding = nn.Embedding(self.vocab_size, self.hidden_dim)
         self.layers = nn.ModuleList([DecoderLayer(config,layer_idx = i) for i in range(self.num_layers)])
         self.lm_head = nn.Linear(self.hidden_dim, self.vocab_size, bias=False)
-        self.layer_norm = LlamaRMSNorm(self.hidden_dim)
+        self.layer_norm = TritonRMSNorm(self.hidden_dim) if os.getenv('TRITONRMSNORM', '1') == '1' else LlamaRMSNorm(self.hidden_dim)
         
         # initializations
         self.init_rope(config.rope_theta)
@@ -202,7 +204,7 @@ class LLaMA(nn.Module):
         x = self.layer_norm(x)
         logits = self.lm_head(x)
         
-        return logits  # [batch_size, seq_length, vocab_size]
+        return logits  # [batch_size, seq_length, vocab_size]     
 
     @torch.inference_mode()
     def generate(self, input_ids, max_new_tokens, use_cache=True):

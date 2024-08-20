@@ -1,4 +1,5 @@
 import sys
+import time
 from tools.debug.debug_llama import DebugMyCausalSelfAttentionforward, DebugMyDecoderLayerforward, DebugMyLLaMAforward
 from src.model.llama3 import LLaMA
 from tools.debug.replace_attn import DebugDecoderLayerforward, DebugRoPEforward, DebugSDPAforward
@@ -17,6 +18,7 @@ from src.data.data import tokenize_dataset, get_dataloader
 os.environ['DATA_TYPE'] = 'bfloat16' # bfloat16/float32
 os.environ['MERGED_QKV_WEIGHT'] = '0' # 1/0
 os.environ['MERGED_GATE_UP_WEIGHT'] = '1' # 1/0
+os.environ['TRITONRMSNORM'] = '0'
 os.environ['ATTENTION'] = 'FLASH' # SDPA/FLASH
 
 # set device and dtype
@@ -30,30 +32,30 @@ torch.manual_seed(seed)
 # Load the tokenizer
 tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
 
-# dataset 
-sequence_length = 512
-dataset = load_dataset("roneneldan/TinyStories", split='train')
-tokenized_dataset = tokenize_dataset(dataset, tokenizer, text_column_name = 'text', sequence_length = sequence_length, dataset_processing_num_proc_per_process = 64)
-
-# DataLoader
-batch_size = 64
-shuffle = False
-dataloader = get_dataloader(tokenized_dataset, batch_size, shuffle)
-
 # Initialize model, loss function, and optimizer
+## GPT2 base model
+sequence_length = 1024
 @dataclass
 class LLaMAConfig:
     batch_size: int = 1
     max_position_embeddings: int = sequence_length
     hidden_dim: int = 768
     intermediate_dim: int = 3072
-    vocab_size = 50364 # https://x.com/karpathy/status/1621578354024677377 still true? 
+    vocab_size = 50257 # 50304 # https://x.com/karpathy/status/1621578354024677377 still true? 
     num_key_values: int = 4
     num_heads: int = 12
     num_layers: int = 12
     rope_theta: float = 500000.0
     torch_dtype: str = 'bfloat16'
     rms_norm_eps: float = 1e-5
+
+dataset = load_dataset("roneneldan/TinyStories", split='train')
+tokenized_dataset = tokenize_dataset(dataset, tokenizer, text_column_name = 'text', sequence_length = sequence_length, dataset_processing_num_proc_per_process = 64)
+
+# DataLoader
+batch_size = 8
+shuffle = False
+dataloader = get_dataloader(tokenized_dataset, batch_size, shuffle)
 
 config = LLaMAConfig()
 model = LLaMA(config).to(dtype).to(device)
@@ -63,6 +65,9 @@ optimizer = optim.Adam(model.parameters(), lr=5e-4)
 # Training loop
 step = 0
 num_epochs = 5
+total_tokens_processed = 0
+start_time = time.time()  # Start time measurement
+
 for epoch in range(num_epochs):
     for data in dataloader:
         input_ids, label_ids = data['input_ids'].to(device) , data['label_ids'].to(device)
@@ -89,7 +94,12 @@ for epoch in range(num_epochs):
         step += 1
         
         # Print the loss for each step
-        print(f'Step [{step}], Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
+        tokens_processed = B * T  # B is batch size, T is sequence length
+        total_tokens_processed += tokens_processed
+        
+        # Print the loss for each step
+        if step % 10 == 0:
+            print(f'Step [{step}], Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}, Tokens/s : {total_tokens_processed / (time.time() - start_time):.2f}')
 
     print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
 
