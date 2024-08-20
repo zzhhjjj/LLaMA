@@ -8,6 +8,8 @@ Currently, this library supports:
 
 1. Flash Attention
 2. KV Cache
+3. Triton RMSNorm
+4. Flash RoPE
 
 ### Coming Soon
 
