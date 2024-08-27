@@ -44,3 +44,14 @@ def get_log_file_path():
     file_name += '_sdpa' if os.getenv('ATTENTION', 'SDPA') == 'SDPA' else '_flash'
     file_name += '_bf16' if os.getenv('DATA_TYPE', 'bfloat16') == 'bfloat16' else '_fp32'
     return os.path.join(path, file_name + '.txt')
+
+def log_model_num_params(model):
+    # Calculate the number of parameters
+    total_params = sum(p.numel() for p in model.parameters())
+
+    # Print the number of parameters
+    if total_params >= 1e9:
+        print(f"Total number of parameters: {total_params / 1e9:.2f} Billion")
+    else:
+        print(f"Total number of parameters: {total_params / 1e6:.2f} Million")
+    return total_params
