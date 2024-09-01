@@ -172,6 +172,7 @@ class LLaMA(nn.Module):
         self.head_dim = self.hidden_dim//self.num_heads
         self.max_position_embeddings = config.max_position_embeddings
         self.num_layers = config.num_layers
+        self.model_config = config
         
         # modules
         self.word_embedding = nn.Embedding(self.vocab_size, self.hidden_dim)

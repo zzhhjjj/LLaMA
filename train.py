@@ -1,9 +1,8 @@
 import sys
 import time
-from tools.debug.debug_llama import DebugMyCausalSelfAttentionforward, DebugMyDecoderLayerforward, DebugMyLLaMAforward
+import logging
 from src.model.llama3 import LLaMA
-from tools.debug.logs import log_model_num_params
-from tools.debug.replace_attn import DebugDecoderLayerforward, DebugRoPEforward, DebugSDPAforward
+from tools.debug.logs import RedirectOutput, log_model_info, log_training_steps, setup_logger
 import torch 
 from dataclasses import dataclass
 from src.weights.weights import load_weights_to_dict, copy_weights_to_model
@@ -33,7 +32,6 @@ dtype = torch.bfloat16 if os.getenv('DATA_TYPE', 'bfloat16') == 'bfloat16' else 
 seed = 42
 torch.manual_seed(seed)
 
-
 ## Initialize model, loss function, and optimizer
 ## GPT2 base model
 tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
@@ -45,7 +43,7 @@ class LLaMAConfig:
     hidden_dim: int = 768
     intermediate_dim: int = 3072
     vocab_size = 50304 #  https://x.com/karpathy/status/1621578354024677377 still true.  50304 ~30% speedup
-    num_key_values: int = 12
+    num_key_values: int = 4
     num_heads: int = 12
     num_layers: int = 12
     rope_theta: float = 500000.0
@@ -53,8 +51,8 @@ class LLaMAConfig:
     rms_norm_eps: float = 1e-5
 
 ## LLaMA3 8b model
-## Note: without TP, I cannot benchmark 8b model! Priority is to support TP!
-# https://huggingface.co/meta-llama/Meta-Llama-3.1-8B/blob/main/config.json
+## Note: without TP, I cannot train real 8b model! Priority is to support TP!
+## https://huggingface.co/meta-llama/Meta-Llama-3.1-8B/blob/main/config.json
 # tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
 # sequence_length = 8192
 # @dataclass
@@ -66,7 +64,7 @@ class LLaMAConfig:
 #     vocab_size = 131072 
 #     num_key_values: int = 8
 #     num_heads: int = 32
-#     num_layers: int = 2 # for profiling. reduce the number of layers to 4
+#     num_layers: int = 32
 #     rope_theta: float = 500000.0
 #     torch_dtype: str = 'bfloat16'
 #     rms_norm_eps: float = 1e-5
@@ -84,11 +82,18 @@ model = LLaMA(config).to(dtype).to(device)
 criterion = nn.CrossEntropyLoss()  # or any other suitable loss function
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
-log_model_num_params(model)
-
 # Training loop
 step = 0
 num_epochs = 5
+total_steps = 300 # -1 for full dataset
+
+# Initialize the logger 
+log_path = "tools/benchmark/loss/loss.txt"
+logger = setup_logger(log_path)
+
+log_model_info(model,logger)
+log_training_steps(num_epochs, total_steps, dataloader)
+
 total_tokens_processed = 0
 start_time = time.time()  # Start time measurement
 
@@ -147,49 +152,53 @@ if use_profiler:
             # Print the loss for each step
             if step % 10 == 0:
                 print(f'Step [{step}], Loss: {loss.item():.4f}, Tokens/s : {total_tokens_processed / (time.time() - start_time):.2f}')
+                if step <= 50:
+                    print(f"Memory Reserved: {torch.cuda.memory_reserved(device) / 1024 ** 3:.2f} GB")
 
             # profiler
             if step >= 50:
                 break       
 else:
     for epoch in range(num_epochs):
-            for data in dataloader:
-                input_ids, label_ids = data['input_ids'].to(device) , data['label_ids'].to(device)
-                
-                # Forward pass
-                outputs = model(input_ids)
-                
-                # adjust shape for the loss
-                B, T, C = outputs.size()
-                outputs = outputs.view(B*T, C)
-                label_ids = label_ids.view(B*T)
-                
-                # Compute the loss
-                loss = criterion(outputs, label_ids)
+        for data in dataloader:
+            input_ids, label_ids = data['input_ids'].to(device) , data['label_ids'].to(device)
+            
+            # Forward pass
+            outputs = model(input_ids)
+            
+            # adjust shape for the loss
+            B, T, C = outputs.size()
+            outputs = outputs.view(B*T, C)
+            label_ids = label_ids.view(B*T)
+            
+            # Compute the loss
+            loss = criterion(outputs, label_ids)
 
-                # Backward pass and optimize
-                loss.backward()
-                optimizer.step()
-                
-                # Zero the parameter gradients
-                optimizer.zero_grad()
-                
-                # Increment step counter
-                step += 1
-                
-                # Print the loss for each step
-                tokens_processed = B * T  # B is batch size, T is sequence length
-                total_tokens_processed += tokens_processed
-                
-                # Print the loss for each step
-                if step % 10 == 0:
-                    print(f'Step [{step}], Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}, Tokens/s : {total_tokens_processed / (time.time() - start_time):.2f}')
-                    if step <= 50:
-                        print(f"Memory Reserved: {torch.cuda.memory_reserved(device) / 1024 ** 3:.2f} GB")
-
-            print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
-
-print("Training complete.")
+            # Backward pass and optimize
+            loss.backward()
+            optimizer.step()
+            
+            # Zero the parameter gradients
+            optimizer.zero_grad()
+            
+            # Increment step counter
+            step += 1
+            
+            tokens_processed = B * T  # B is batch size, T is sequence length
+            total_tokens_processed += tokens_processed
+            
+            # Print the loss for each step
+            if step % 10 == 0:
+                logger.info(f'Step [{step}], Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}, Tokens/s : {total_tokens_processed / (time.time() - start_time):.2f}')
+                if step <= 50:
+                    logger.info(f"Memory Reserved: {torch.cuda.memory_reserved(device) / 1024 ** 3:.2f} GB")
+                if total_steps != -1 and step >= total_steps:
+                    finished = True
+                    break
+        if finished:
+            break
+        logger.info(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
+    logger.info("Training complete.")
 
 
 

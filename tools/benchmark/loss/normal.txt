@@ -1,0 +1,49 @@
+LLaMAConfig:
+  batch_size: 1
+  max_position_embeddings: 1024
+  hidden_dim: 768
+  intermediate_dim: 3072
+  vocab_size: 50304
+  num_key_values: 4
+  num_heads: 12
+  num_layers: 12
+  rope_theta: 500000.0
+  torch_dtype: bfloat16
+  rms_norm_eps: 1e-05
+Total number of parameters: 181.10 Million
+Step [10], Epoch [1/5], Loss: 5.0938, Tokens/s : 172403.43
+Memory Reserved: 58.43 GB
+Step [20], Epoch [1/5], Loss: 4.4688, Tokens/s : 228048.31
+Memory Reserved: 58.43 GB
+Step [30], Epoch [1/5], Loss: 4.2188, Tokens/s : 255440.99
+Memory Reserved: 58.43 GB
+Step [40], Epoch [1/5], Loss: 4.1562, Tokens/s : 271887.58
+Memory Reserved: 58.43 GB
+Step [50], Epoch [1/5], Loss: 3.7188, Tokens/s : 282636.31
+Memory Reserved: 58.43 GB
+Step [60], Epoch [1/5], Loss: 3.7969, Tokens/s : 290329.74
+Step [70], Epoch [1/5], Loss: 3.8906, Tokens/s : 296113.78
+Step [80], Epoch [1/5], Loss: 3.6719, Tokens/s : 300603.15
+Step [90], Epoch [1/5], Loss: 3.7969, Tokens/s : 304152.25
+Step [100], Epoch [1/5], Loss: 3.3438, Tokens/s : 307076.48
+Step [110], Epoch [1/5], Loss: 3.2969, Tokens/s : 309491.83
+Step [120], Epoch [1/5], Loss: 3.6562, Tokens/s : 311510.59
+Step [130], Epoch [1/5], Loss: 3.1406, Tokens/s : 313241.54
+Step [140], Epoch [1/5], Loss: 3.4375, Tokens/s : 314737.34
+Step [150], Epoch [1/5], Loss: 3.2500, Tokens/s : 316053.88
+Step [160], Epoch [1/5], Loss: 2.9375, Tokens/s : 317227.81
+Step [170], Epoch [1/5], Loss: 3.1875, Tokens/s : 318259.71
+Step [180], Epoch [1/5], Loss: 3.0469, Tokens/s : 319161.01
+Step [190], Epoch [1/5], Loss: 2.7812, Tokens/s : 319983.67
+Step [200], Epoch [1/5], Loss: 2.7188, Tokens/s : 320706.95
+Step [210], Epoch [1/5], Loss: 3.0156, Tokens/s : 321361.61
+Step [220], Epoch [1/5], Loss: 2.8125, Tokens/s : 321938.55
+Step [230], Epoch [1/5], Loss: 2.5625, Tokens/s : 322501.68
+Step [240], Epoch [1/5], Loss: 2.5625, Tokens/s : 323030.08
+Step [250], Epoch [1/5], Loss: 2.5156, Tokens/s : 323509.73
+Step [260], Epoch [1/5], Loss: 2.3438, Tokens/s : 323913.03
+Step [270], Epoch [1/5], Loss: 2.7500, Tokens/s : 324305.85
+Step [280], Epoch [1/5], Loss: 2.2812, Tokens/s : 324668.97
+Step [290], Epoch [1/5], Loss: 2.4531, Tokens/s : 325024.35
+Step [300], Epoch [1/5], Loss: 2.5781, Tokens/s : 325367.97
+Training complete.
