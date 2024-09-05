@@ -1,0 +1,40 @@
+LLaMAConfig:
+  batch_size: 1
+  max_position_embeddings: 1024
+  hidden_dim: 768
+  intermediate_dim: 3072
+  vocab_size: 50304
+  num_key_values: 4
+  num_heads: 12
+  num_layers: 12
+  rope_theta: 500000.0
+  torch_dtype: bfloat16
+  rms_norm_eps: 1e-05
+
+Total number of parameters: 181.10 Million
+
+Step [10], Epoch [1/5], Loss: 5.2188, Tokens/s : 137495.59
+Memory Reserved: 58.43 GB
+Step [20], Epoch [1/5], Loss: 4.4688, Tokens/s : 195143.96
+Memory Reserved: 58.43 GB
+Step [30], Epoch [1/5], Loss: 4.2188, Tokens/s : 226859.86
+Memory Reserved: 58.43 GB
+Step [40], Epoch [1/5], Loss: 4.1562, Tokens/s : 246885.83
+Memory Reserved: 58.43 GB
+Step [50], Epoch [1/5], Loss: 3.7031, Tokens/s : 260619.50
+Memory Reserved: 58.43 GB
+Step [60], Epoch [1/5], Loss: 3.7812, Tokens/s : 270644.77
+Step [70], Epoch [1/5], Loss: 3.8906, Tokens/s : 278256.48
+Step [80], Epoch [1/5], Loss: 3.6719, Tokens/s : 284296.62
+Step [90], Epoch [1/5], Loss: 3.8125, Tokens/s : 289170.50
+Step [100], Epoch [1/5], Loss: 3.3594, Tokens/s : 293137.00
+Step [110], Epoch [1/5], Loss: 3.2969, Tokens/s : 296462.26
+Step [120], Epoch [1/5], Loss: 3.6406, Tokens/s : 299283.97
+Step [130], Epoch [1/5], Loss: 3.1250, Tokens/s : 301667.25
+Step [140], Epoch [1/5], Loss: 3.4375, Tokens/s : 303767.94
+Step [150], Epoch [1/5], Loss: 3.2344, Tokens/s : 305601.78
+Step [160], Epoch [1/5], Loss: 2.9062, Tokens/s : 307282.48
+Step [170], Epoch [1/5], Loss: 3.1875, Tokens/s : 308792.46
+Step [180], Epoch [1/5], Loss: 3.0312, Tokens/s : 310103.58
+Step [190], Epoch [1/5], Loss: 2.7656, Tokens/s : 311311.41
+Step [200], Epoch [1/5], Loss: 2.7031, Tokens/s : 312398.63

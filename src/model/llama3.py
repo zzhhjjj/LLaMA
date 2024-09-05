@@ -1,6 +1,7 @@
 import os
 from src.generation.decode import KVcache
 from src.nn.layer_norm import LlamaRMSNorm, TritonRMSNorm
+from src.parallel.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding
 import torch 
 from dataclasses import dataclass
 import torch.nn as nn
@@ -62,12 +63,17 @@ class CausalSelfAttention(nn.Module):
         if self.is_merged_qkv_weight  == '1': 
             self.qkv_proj = nn.Linear(config.hidden_dim, self.num_heads*self.head_dim + 2*self.num_key_values*self.head_dim, bias=False)
         else:
-            self.q_proj = nn.Linear(config.hidden_dim, self.num_heads*self.head_dim, bias=False)
-            self.k_proj = nn.Linear(config.hidden_dim, self.num_key_values*self.head_dim, bias=False)
-            self.v_proj = nn.Linear(config.hidden_dim, self.num_key_values*self.head_dim, bias=False)
+            # self.q_proj = nn.Linear(config.hidden_dim, self.num_heads*self.head_dim, bias=False)
+            # self.k_proj = nn.Linear(config.hidden_dim, self.num_key_values*self.head_dim, bias=False)
+            # self.v_proj = nn.Linear(config.hidden_dim, self.num_key_values*self.head_dim, bias=False)
+            self.q_proj = ColumnParallelLinear(config.hidden_dim, self.num_heads*self.head_dim, bias=False, gather_output=False, init_method=lambda x: x) # why the init method is x? Xavier is better?
+            self.k_proj = ColumnParallelLinear(config.hidden_dim, self.num_key_values*self.head_dim, bias=False, gather_output=False, init_method=lambda x: x)
+            self.v_proj = ColumnParallelLinear(config.hidden_dim, self.num_key_values*self.head_dim, bias=False, gather_output=False, init_method=lambda x: x)
         # if os.getenv('FLASH_ROPE', '1') == '1':
         #     self.flash_rope = FlashRotaryEmbedding(dim=self.head_dim, interleaved=False, base=500000.0)
-        self.out_proj = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
+        
+        # self.out_proj = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
+        self.out_proj = RowParallelLinear(self.num_heads * self.head_dim, config.hidden_dim, bias=False, input_is_parallel=True, init_method=lambda x: x)
         self.kv_cache = None
         self.layer_idx = layer_idx
         
@@ -128,9 +134,12 @@ class LLaMAMLP(nn.Module):
         if self.merged_gate_up:
             self.gate_up_proj = nn.Linear(config.hidden_dim, config.intermediate_dim*2, bias=False)
         else:
-            self.up_proj = nn.Linear(config.hidden_dim, config.intermediate_dim, bias=False)
-            self.gate_proj = nn.Linear(config.hidden_dim, config.intermediate_dim, bias=False)
-        self.down_proj = nn.Linear(config.intermediate_dim, config.hidden_dim, bias=False)
+            # self.up_proj = nn.Linear(config.hidden_dim, config.intermediate_dim, bias=False)
+            # self.gate_proj = nn.Linear(config.hidden_dim, config.intermediate_dim, bias=False)
+            self.up_proj = ColumnParallelLinear(config.hidden_dim, config.intermediate_dim, bias=False, gather_output=False, init_method=lambda x: x)
+            self.gate_proj = ColumnParallelLinear(config.hidden_dim, config.intermediate_dim, bias=False, gather_output=False, init_method=lambda x: x)
+        # self.down_proj = nn.Linear(config.intermediate_dim, config.hidden_dim, bias=False)
+        self.down_proj = RowParallelLinear(config.intermediate_dim, config.hidden_dim, bias=False, input_is_parallel=True, init_method=lambda x: x)
         
     def forward(self, x):
         if  self.merged_gate_up:
@@ -175,9 +184,11 @@ class LLaMA(nn.Module):
         self.model_config = config
         
         # modules
-        self.word_embedding = nn.Embedding(self.vocab_size, self.hidden_dim)
+        # self.word_embedding = nn.Embedding(self.vocab_size, self.hidden_dim)
+        self.word_embedding = VocabParallelEmbedding(self.vocab_size, self.hidden_dim, init_method=lambda x: x)
         self.layers = nn.ModuleList([DecoderLayer(config,layer_idx = i) for i in range(self.num_layers)])
-        self.lm_head = nn.Linear(self.hidden_dim, self.vocab_size, bias=False)
+        # self.lm_head = nn.Linear(self.hidden_dim, self.vocab_size, bias=False)
+        self.lm_head = ColumnParallelLinear(self.hidden_dim, self.vocab_size, bias=False, gather_output=True, init_method=lambda x: x) # we can also not gather the output. TODO: add Sharded CrossEntropyLoss
         self.layer_norm = TritonRMSNorm(self.hidden_dim) if os.getenv('TRITONRMSNORM', '1') == '1' else LlamaRMSNorm(self.hidden_dim)
         
         # initializations
