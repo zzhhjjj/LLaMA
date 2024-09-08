@@ -1,9 +1,9 @@
 from typing import List, Optional
-
+import os
 import torch
 from datetime import timedelta
+import torch.distributed as dist
 
-from .utils import ensure_divisibility
 
 # TP/CP/PP/DDP parallel group that the current rank belongs to.
 _MODEL_PARALLEL_GROUP = None
@@ -12,6 +12,13 @@ _PIPELINE_PARALLEL_GROUP = None
 _PIPELINE_PARALLEL_RANKS = None
 _CONTEXT_PARALLEL_GROUP = None
 _CONTEXT_PARALLEL_GROUP_RANKS = None
+
+def initialize_torch_distributed():
+    rank = int(os.getenv("RANK", "0"))
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend='nccl', init_method='env://', rank=rank, world_size=world_size)
 
 def initialize_process_groups(
     model_parallel_size: int,
@@ -63,6 +70,10 @@ def initialize_process_groups(
     assert all(len(x) == 1 for x in found)
     found = [x[0] for x in found]
     
+    # Set a default timeout if it's not provided
+    if timeout is None:
+        timeout = timedelta(minutes=10)  
+        
     # Create process groups
     for i in range(pipeline_parallel_size):
         for j in range(context_parallel_size):
@@ -153,6 +164,9 @@ def get_pipeline_parallel_ranks() -> List[int]:
     assert _PIPELINE_PARALLEL_RANKS is not None, "pipeline parallel group is not initialized"
     return _PIPELINE_PARALLEL_RANKS
 
+def get_pipeline_parallel_world_size() -> int:
+    """Return world size for the pipeline parallel group."""
+    return torch.distributed.get_world_size(group=get_pipeline_parallel_group())
 
 def get_model_parallel_world_size() -> int:
     """Return world size for the model parallel group."""

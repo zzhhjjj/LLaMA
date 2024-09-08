@@ -4,3 +4,4 @@ __pycache__
 *.ipynb
 .cache
 llama.egg-info
+*.txt

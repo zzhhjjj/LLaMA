@@ -1,6 +1,7 @@
 import torch.distributed as dist
 import torch
-from .utils import get_model_parallel_group, get_tensor_parallel_group, split_tensor_along_last_dim
+from .initialize import get_model_parallel_group 
+from .utils import split_tensor_along_last_dim
 
 # Reference : Fairscale, Megatron-LM
 # https://github.com/facebookresearch/fairscale/blob/main/fairscale/nn/model_parallel/mappings.py
@@ -8,7 +9,7 @@ from .utils import get_model_parallel_group, get_tensor_parallel_group, split_te
 def _reduce(input_):
     """All-reduce the input tensor across model parallel(TP) group."""
 
-    tp_group = get_tensor_parallel_group()
+    tp_group = get_model_parallel_group()
     
     # Bypass the function if we are using only 1 GPU.
     if dist.get_world_size(tp_group) == 1:

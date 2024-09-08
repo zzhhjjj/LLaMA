@@ -4,6 +4,8 @@ import sys
 from functools import wraps
 import time
 import logging
+from src.parallel.tensor_parallel.initialize import get_model_parallel_world_size, get_pipeline_parallel_world_size
+import torch.distributed as dist
 
 @contextmanager
 def timer(name):
@@ -69,32 +71,47 @@ def setup_logger(file_path=None):
 def log_model_info(model, logger):
     log_config(model.model_config, logger)
     # Calculate the number of parameters
-    total_params = sum(p.numel() for p in model.parameters())
+    tp_pp_size = get_model_parallel_world_size() * get_pipeline_parallel_world_size()
+    total_params = sum(p.numel() for p in model.parameters()) * tp_pp_size
 
-    # Print the number of parameters
-    if total_params >= 1e9:
-        logger.info(f"Total number of parameters: {total_params / 1e9:.2f} Billion\n")
-    else:
-        logger.info(f"Total number of parameters: {total_params / 1e6:.2f} Million\n")
+    if dist.get_rank() == 0:
+        # Print the number of parameters
+        if total_params >= 1e9:
+            logger.info(f"Total number of parameters: {total_params / 1e9:.2f} Billion\n")
+        else:
+            logger.info(f"Total number of parameters: {total_params / 1e6:.2f} Million\n")
     return total_params
 
+
 def log_config(config, logger):
-    logger.info(f"LLaMAConfig:")
-    logger.info(f"  batch_size: {config.batch_size}")
-    logger.info(f"  max_position_embeddings: {config.max_position_embeddings}")
-    logger.info(f"  hidden_dim: {config.hidden_dim}")
-    logger.info(f"  intermediate_dim: {config.intermediate_dim}")
-    logger.info(f"  vocab_size: {config.vocab_size}")
-    logger.info(f"  num_key_values: {config.num_key_values}")
-    logger.info(f"  num_heads: {config.num_heads}")
-    logger.info(f"  num_layers: {config.num_layers}")
-    logger.info(f"  rope_theta: {config.rope_theta}")
-    logger.info(f"  torch_dtype: {config.torch_dtype}")
-    logger.info(f"  rms_norm_eps: {config.rms_norm_eps}\n")
+    if dist.get_rank() == 0:
+        logger.info(f"LLaMAConfig:")
+        # logger.info(f"  batch_size: {config.batch_size}")
+        logger.info(f"  max_position_embeddings: {config.max_position_embeddings}")
+        logger.info(f"  hidden_dim: {config.hidden_dim}")
+        logger.info(f"  intermediate_dim: {config.intermediate_dim}")
+        logger.info(f"  vocab_size: {config.vocab_size}")
+        logger.info(f"  num_key_values: {config.num_key_values}")
+        logger.info(f"  num_heads: {config.num_heads}")
+        logger.info(f"  num_layers: {config.num_layers}")
+        logger.info(f"  rope_theta: {config.rope_theta}")
+        logger.info(f"  torch_dtype: {config.torch_dtype}")
+        logger.info(f"  rms_norm_eps: {config.rms_norm_eps}\n")
 
 def log_training_steps(num_epochs, total_steps, dataloader):
-    if total_steps != -1:
-        assert num_epochs * len(dataloader) >= total_steps, "The number of steps is greater than the number of steps in the dataloader"
-        print(f"Training for {total_steps} steps")
+    if dist.get_rank() == 0:
+        if total_steps != -1:
+            assert num_epochs * len(dataloader) >= total_steps, "The number of steps is greater than the number of steps in the dataloader"
+            print(f"Training for {total_steps} steps")
+        else:
+            print(f"Training for {num_epochs} epochs")
+            
+def num_to_str(num, precision=2):
+    if num >= 1e9:
+        return f"{num / 1e9:.{precision}f}B"
+    elif num >= 1e6:
+        return f"{num / 1e6:.{precision}f}M"
+    elif num >= 1e3:
+        return f"{num / 1e3:.{precision}f}K"
     else:
-        print(f"Training for {num_epochs} epochs")
+        return str(num)

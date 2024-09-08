@@ -39,7 +39,7 @@ def tokenize_dataset(dataset, tokenizer, text_column_name, sequence_length, data
     return tokenized_dataset
 
 
-def get_dataloader(tokenized_dataset, batch_size, shuffle):
+def get_dataloader(tokenized_dataset, batch_size, shuffle, pin_memory=True, num_workers=0):
     """Create a dataloader from a tokenized dataset
     Args:
         tokenized_dataset (_type_): a tokenized dataset
@@ -60,4 +60,4 @@ def get_dataloader(tokenized_dataset, batch_size, shuffle):
             'attention_mask': torch.tensor(attention_mask, dtype=torch.long),
             'label_mask': torch.tensor(label_mask, dtype=torch.long),
         }
-    return DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
+    return DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn, num_workers=num_workers, pin_memory=pin_memory)
