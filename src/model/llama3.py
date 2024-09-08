@@ -194,7 +194,7 @@ class LLaMA(nn.Module):
         self.word_embedding = VocabParallelEmbedding(self.vocab_size, self.hidden_dim, init_method=init_method)
         self.layers = nn.ModuleList([DecoderLayer(config,layer_idx = i) for i in range(self.num_layers)])
         # self.lm_head = nn.Linear(self.hidden_dim, self.vocab_size, bias=False)
-        self.lm_head = ColumnParallelLinear(self.hidden_dim, self.vocab_size, bias=False, gather_output=True, init_method=init_method) # we can also not gather the output. TODO: add Sharded CrossEntropyLoss
+        self.lm_head = ColumnParallelLinear(self.hidden_dim, self.vocab_size, bias=False, gather_output=True, init_method=init_method) # we can also not gather the output. TODO: add vocab_parallel_cross_entropy
         self.layer_norm = TritonRMSNorm(self.hidden_dim) if os.getenv('TRITONRMSNORM', '1') == '1' else LlamaRMSNorm(self.hidden_dim)
         
         # initializations

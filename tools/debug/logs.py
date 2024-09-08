@@ -4,7 +4,7 @@ import sys
 from functools import wraps
 import time
 import logging
-from src.parallel.tensor_parallel.initialize import get_model_parallel_world_size, get_pipeline_parallel_world_size
+from src.parallel.tensor_parallel.initialize import get_model_parallel_group, get_model_parallel_world_size, get_pipeline_parallel_group, get_pipeline_parallel_world_size
 import torch.distributed as dist
 
 @contextmanager
@@ -71,8 +71,9 @@ def setup_logger(file_path=None):
 def log_model_info(model, logger):
     log_config(model.model_config, logger)
     # Calculate the number of parameters
-    tp_pp_size = get_model_parallel_world_size() * get_pipeline_parallel_world_size()
-    total_params = sum(p.numel() for p in model.parameters()) * tp_pp_size
+    total_params = sum(p.numel() for p in model.parameters())
+    dist.all_reduce(total_params, group=get_model_parallel_group(), async_op=False, op=dist.ReduceOp.SUM)  # TP
+    dist.all_reduce(total_params, group=get_pipeline_parallel_group(), async_op=False, op=dist.ReduceOp.SUM)  # PP 
 
     if dist.get_rank() == 0:
         # Print the number of parameters
