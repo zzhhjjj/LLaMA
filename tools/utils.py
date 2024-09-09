@@ -7,6 +7,7 @@ import logging
 import torch
 from src.parallel.tensor_parallel.initialize import get_model_parallel_group, get_model_parallel_world_size, get_pipeline_parallel_group, get_pipeline_parallel_world_size
 import torch.distributed as dist
+from dataclasses import asdict
 
 @contextmanager
 def timer(name):
@@ -69,9 +70,11 @@ def setup_logger(file_path=None):
 
     return logger
 
-def log_config(model, train_config, logger):
-    log_model_config(model.model_config, logger)
-    log_train_config(train_config, logger)
+def log_info(model_config, train_config, logger):
+    log_config(model_config, logger, "LLaMAConfig:")
+    log_config(train_config, logger,"TrainConfig:")
+
+def get_num_params(model,logger):
     # Calculate the number of parameters
     total_params = sum(p.numel() for p in model.parameters())
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -82,35 +85,16 @@ def log_config(model, train_config, logger):
 
     if dist.get_rank() == 0:
         # Print the number of parameters
-        if total_params >= 1e9:
-            logger.info(f"Total number of parameters: {total_params / 1e9:.2f} Billion\n")
-        else:
-            logger.info(f"Total number of parameters: {total_params / 1e6:.2f} Million\n")
+        logger.info(f"Total number of parameters: {num_to_str(total_params)}\n")
     return total_params
 
-def log_train_config(config, logger):
+def log_config(config, logger, message):
     if dist.get_rank() == 0:
-        logger.info("TrainConfig:")
-        logger.info(f"  num_epochs: {config.num_epochs}")
-        logger.info(f"  total_steps: {config.total_steps}")
-        logger.info(f"  accumulation_steps: {config.accumulation_steps}")
-        logger.info(f"  learning_rate: {config.lr}")
-        logger.info(f"  batch_size: {config.batch_size}\n")
-
-def log_model_config(config, logger):
-    if dist.get_rank() == 0:
-        logger.info(f"LLaMAConfig:")
-        # logger.info(f"  batch_size: {config.batch_size}")
-        logger.info(f"  max_position_embeddings: {config.max_position_embeddings}")
-        logger.info(f"  hidden_dim: {config.hidden_dim}")
-        logger.info(f"  intermediate_dim: {config.intermediate_dim}")
-        logger.info(f"  vocab_size: {config.vocab_size}")
-        logger.info(f"  num_key_values: {config.num_key_values}")
-        logger.info(f"  num_heads: {config.num_heads}")
-        logger.info(f"  num_layers: {config.num_layers}")
-        logger.info(f"  rope_theta: {config.rope_theta}")
-        logger.info(f"  torch_dtype: {config.torch_dtype}")
-        logger.info(f"  rms_norm_eps: {config.rms_norm_eps}\n")
+        logger.info(message)
+        config_dict = asdict(config)  # Convert the dataclass to a dictionary
+        for key, value in config_dict.items():
+            logger.info(f"  {key}: {value}")
+        logger.info("")  # Add an empty line after logging
 
 def log_training_steps(num_epochs, total_steps, dataloader):
     if dist.get_rank() == 0:
@@ -121,11 +105,32 @@ def log_training_steps(num_epochs, total_steps, dataloader):
             print(f"Training for {num_epochs} epochs")
             
 def num_to_str(num, precision=2):
-    if num >= 1e9:
+    if num >= 1e12:
+        return f"{num / 1e12:.{precision}f}T"
+    elif num >= 1e9:
         return f"{num / 1e9:.{precision}f}B"
     elif num >= 1e6:
         return f"{num / 1e6:.{precision}f}M"
     elif num >= 1e3:
         return f"{num / 1e3:.{precision}f}K"
     else:
-        return str(num)
+        return f"{num:.{precision}f}"
+    
+def load_env_file(path='.env'):
+    """
+    Loads environment variables from a file and sets them in the OS environment.
+    """
+    try:
+        with open(path) as f:
+            for line in f:
+                # Ignore comments and empty lines
+                if line.startswith('#') or not line.strip():
+                    continue
+                # Split the line by the first '=' symbol
+                key, value = line.split('=', 1)
+                # Set the environment variable
+                os.environ[key.strip()] = value.strip()
+    except FileNotFoundError:
+        print(f"Error: The file {path} was not found.")
+    except Exception as e:
+        print(f"An error occurred: {e}")

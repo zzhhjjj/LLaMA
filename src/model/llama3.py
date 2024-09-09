@@ -222,7 +222,17 @@ class LLaMA(nn.Module):
         x = self.layer_norm(x)
         logits = self.lm_head(x)
         
-        return logits  # [batch_size, seq_length, vocab_size]     
+        return logits  # [batch_size, seq_length, vocab_size]
+    
+    # https://github.com/karpathy/nanoGPT/blob/9755682b981a45507f6eb9b11eadef8cb83cebd5/model.py#L289-L303
+    # https://zhuanlan.zhihu.com/p/667489780 
+    def get_flops(self, fwdbwd_per_iter, dt, num_params):
+        L, H, T = self.num_layers , self.hidden_dim, self.max_position_embeddings
+        flops_per_fwdbwd = 6 * num_params * T + 12* L* H* T ** 2
+        flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
+        flops_achieved = flops_per_iter * (1.0/dt) # per second
+        return flops_achieved
+             
 
     @torch.inference_mode()
     def generate(self, input_ids, max_new_tokens, use_cache=True):

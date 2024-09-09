@@ -46,6 +46,7 @@ def initialize_process_groups(
         print("> initializing context parallel with size {}".format(context_parallel_size))
         print("> initializing pipeline with size {}".format(pipeline_parallel_size))
         print("> initializing ddp with size {}".format(data_parallel_size))
+        print("")
     
     # Set global variables
     global _DATA_PARALLEL_GROUP

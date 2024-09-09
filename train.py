@@ -11,7 +11,7 @@ Why CUDA_DEVICE_MAX_CONNECTIONS=1:
 import time
 from src.model.llama3 import LLaMA
 from src.parallel.tensor_parallel.initialize import initialize_process_groups, initialize_torch_distributed
-from tools.debug.logs import log_config, log_training_steps, num_to_str, setup_logger
+from tools.utils import get_num_params, log_info, log_training_steps, num_to_str, setup_logger, load_env_file
 import torch 
 from dataclasses import dataclass
 from src.weights.weights import load_weights_to_dict, copy_weights_to_model
@@ -23,8 +23,11 @@ import torch.distributed as dist
 from datasets import load_dataset
 from src.data.data import tokenize_dataset, get_dataloader
 
+# Set env variables
+load_env_file('.env')
 
 # to match the output of transformers model, set MERGED_QKV_WEIGHT to 0 is necessary
+os.environ['OMP_NUM_THREADS'] = '4'
 os.environ['DATA_TYPE'] = 'bfloat16' # bfloat16/float32
 os.environ['MERGED_QKV_WEIGHT'] = '0' # 1/0
 os.environ['MERGED_GATE_UP_WEIGHT'] = '0' # 1/0
@@ -48,46 +51,54 @@ class train_config:
     num_epochs: int = 5
     total_steps: int = 300  # -1 for full dataset
     accumulation_steps: int = 4
-    lr: float = 3e-4
+    lr: float = 3e-5
     batch_size: int = 64
+    adam_weight_decay: float = 0.1
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.95
+    adam_eps: float = 1.0e-10
 
 ## Initialize model, loss function, and optimizer
 ## GPT2 base model
-train_config = train_config(lr=3e-4,accumulation_steps=4, batch_size=64)
-tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
-@dataclass
-class LLaMAConfig:
-    max_position_embeddings: int = 1024
-    hidden_dim: int = 768
-    intermediate_dim: int = 3072
-    vocab_size = 50304 #  https://x.com/karpathy/status/1621578354024677377 still true.  50304 ~30% speedup
-    num_key_values: int = 4
-    num_heads: int = 12
-    num_layers: int = 12
-    rope_theta: float = 500000.0
-    torch_dtype: str = 'bfloat16'
-    rms_norm_eps: float = 1e-5
-
-## LLaMA3 8b model
-## Note: For the convergence speed is slow compared to 180M model. Need more test.
-# # https://huggingface.co/meta-llama/Meta-Llama-3.1-8B/blob/main/config.json
-# train_config = train_config(lr=3e-4,accumulation_steps=4, batch_size=64)
-# tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
+# tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
 # @dataclass
 # class LLaMAConfig:
-#     # batch_size: int = 1
-#     max_position_embeddings: int = 8192
-#     hidden_dim: int = 4096
-#     intermediate_dim: int = 14336
-#     vocab_size = 131072 
-#     num_key_values: int = 8
-#     num_heads: int = 32
-#     num_layers: int = 32
+#     max_position_embeddings: int = 1024
+#     hidden_dim: int = 768
+#     intermediate_dim: int = 3072
+#     vocab_size = 50304 #  https://x.com/karpathy/status/1621578354024677377 still true.  50304 ~30% speedup
+#     num_key_values: int = 4
+#     num_heads: int = 12
+#     num_layers: int = 12
 #     rope_theta: float = 500000.0
 #     torch_dtype: str = 'bfloat16'
 #     rms_norm_eps: float = 1e-5
 
-model_config = LLaMAConfig()
+
+# train_config = train_config(lr=3e-4,accumulation_steps=4, batch_size=64)
+
+## LLaMA3 8b model
+## Note: For the convergence speed is slow compared to 180M model. Need more test.
+# # https://huggingface.co/meta-llama/Meta-Llama-3.1-8B/blob/main/config.json
+# tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf")
+@dataclass
+class LLaMAConfig:
+    max_position_embeddings: int = 8192
+    hidden_dim: int = 4096
+    intermediate_dim: int = 14336
+    vocab_size: int = 131072 
+    num_key_values: int = 8
+    num_heads: int = 32
+    num_layers: int = 32
+    rope_theta: float = 500000.0
+    torch_dtype: str = 'bfloat16'
+    rms_norm_eps: float = 1e-5
+train_config = train_config(lr=3e-4,accumulation_steps=1, batch_size=4)
+
+model_config = LLaMAConfig(max_position_embeddings=4096, intermediate_dim=11008, vocab_size=32000, num_key_values=32) # LLaMA 2 7b 
+# model_config = LLaMAConfig()
+# model_confif = LLaMAConfig(max_position_embeddings=1024, hidden_dim=768, intermediate_dim=3072, vocab_size=50304, num_key_values=4, num_heads=12, num_layers=12) # GPT2
 
 dataset = load_dataset("roneneldan/TinyStories", split='train')
 tokenized_dataset = tokenize_dataset(dataset, tokenizer, text_column_name = 'text', sequence_length = model_config.max_position_embeddings, dataset_processing_num_proc_per_process = 64)
@@ -106,15 +117,16 @@ model = LLaMA(model_config).to(dtype).to(device)
 
 # Loss function and optimizer
 criterion = nn.CrossEntropyLoss()  # or any other suitable loss function
-optimizer = optim.Adam(model.parameters(), lr=train_config.lr)
+optimizer = optim.Adam(model.parameters(), lr=train_config.lr, weight_decay=train_config.adam_weight_decay, betas=(train_config.adam_beta1, train_config.adam_beta2), eps=train_config.adam_eps)
 
 # Initialize the logger 
 log_path = "tools/benchmark/loss/loss.txt"
 logger = setup_logger(log_path)
 
 # Log some information 
-log_config(model,train_config,logger)
+log_info(model_config,train_config,logger)
 log_training_steps(train_config.num_epochs, train_config.total_steps, dataloader)
+num_params = get_num_params(model,logger)
 
 # Initilize the step counter
 step = 0
@@ -220,20 +232,26 @@ else:
                 log_interval = 1
                 if step % log_interval == 0 and dist.get_rank() == 0:
                     current_time = time.time()
-                    tokens_per_second = tokens_per_step * log_interval / (current_time - start_time)
+                    time_taken = current_time - start_time
+                    tokens_per_second = tokens_per_step * log_interval / time_taken
+                    flops_per_gpu = model.get_flops(train_config.accumulation_steps, time_taken, num_params)/world_size
                     start_time = current_time
                     
                     logger.info(f"Step [{step}], Epoch [{epoch+1}/{train_config.num_epochs}], Loss: {loss.item() * train_config.accumulation_steps:.4f}, "
                         f"Global batch size: {num_to_str(tokens_per_step)}, "
                         f"Accumulated tokens: {num_to_str(total_tokens_processed)}, "
                         f"Tokens/s: {num_to_str(tokens_per_second)}, "
-                        f"Tokens/s per GPU: {num_to_str(tokens_per_second/world_size)} "
+                        f"Tokens/s/GPU: {num_to_str(tokens_per_second/world_size)}, "
+                        f"FLOPS/GPU: {num_to_str(flops_per_gpu)}, " 
+                        f"MFU: {num_to_str(flops_per_gpu/989e10)}% " # H100 GPU bfloat16 peak flops： 989e12
                     )
                     if step <= 10:
                         logger.info(f"Memory Reserved: {torch.cuda.memory_reserved(device) / 1024 ** 3:.2f} GB")
-                    if train_config.total_steps != -1 and step >= train_config.total_steps:
-                        finished = True
-                        break
+
+                # Check if the training should be stopped
+                if train_config.total_steps != -1 and step >= train_config.total_steps:
+                    finished = True
+                    break
         if finished:
             break
         logger.info(f'Epoch [{epoch+1}/{train_config.num_epochs}], Loss: {loss.item():.4f}')

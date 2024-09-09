@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from src.weights.weights import load_weights_to_dict, copy_weights_to_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import os
-from tools.debug.logs import RedirectOutput, get_log_file_path, print_env_variables, timer
+from tools.utils import RedirectOutput, get_log_file_path, print_env_variables, timer
 import lovely_tensors as lt
 lt.monkey_patch()
 from lovely_tensors import set_config
