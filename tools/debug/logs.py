@@ -4,6 +4,7 @@ import sys
 from functools import wraps
 import time
 import logging
+import torch
 from src.parallel.tensor_parallel.initialize import get_model_parallel_group, get_model_parallel_world_size, get_pipeline_parallel_group, get_pipeline_parallel_world_size
 import torch.distributed as dist
 
@@ -68,12 +69,16 @@ def setup_logger(file_path=None):
 
     return logger
 
-def log_model_info(model, logger):
-    log_config(model.model_config, logger)
+def log_config(model, train_config, logger):
+    log_model_config(model.model_config, logger)
+    log_train_config(train_config, logger)
     # Calculate the number of parameters
     total_params = sum(p.numel() for p in model.parameters())
-    dist.all_reduce(total_params, group=get_model_parallel_group(), async_op=False, op=dist.ReduceOp.SUM)  # TP
-    dist.all_reduce(total_params, group=get_pipeline_parallel_group(), async_op=False, op=dist.ReduceOp.SUM)  # PP 
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    total_params_tensor = torch.tensor(total_params, dtype=torch.float32).to(device)
+    dist.all_reduce(total_params_tensor, group=get_model_parallel_group(), async_op=False, op=dist.ReduceOp.SUM)  # TP
+    dist.all_reduce(total_params_tensor, group=get_pipeline_parallel_group(), async_op=False, op=dist.ReduceOp.SUM)  # PP 
+    total_params = total_params_tensor.item()
 
     if dist.get_rank() == 0:
         # Print the number of parameters
@@ -83,8 +88,16 @@ def log_model_info(model, logger):
             logger.info(f"Total number of parameters: {total_params / 1e6:.2f} Million\n")
     return total_params
 
+def log_train_config(config, logger):
+    if dist.get_rank() == 0:
+        logger.info("TrainConfig:")
+        logger.info(f"  num_epochs: {config.num_epochs}")
+        logger.info(f"  total_steps: {config.total_steps}")
+        logger.info(f"  accumulation_steps: {config.accumulation_steps}")
+        logger.info(f"  learning_rate: {config.lr}")
+        logger.info(f"  batch_size: {config.batch_size}\n")
 
-def log_config(config, logger):
+def log_model_config(config, logger):
     if dist.get_rank() == 0:
         logger.info(f"LLaMAConfig:")
         # logger.info(f"  batch_size: {config.batch_size}")
