@@ -1,6 +1,7 @@
 """Training script for LLaMA model.
 Command to run this script:
-CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun    --nproc_per_node=4    --nnodes=1    --rdzv_backend=c10d    --rdzv_endpoint=localhost:29400    --max_restarts=0    --tee=3    train.py
+CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun    --nproc_per_node=2    --nnodes=1    --rdzv_backend=c10d    --rdzv_endpoint=localhost:29400    --max_restarts=0    --tee=3    train.py
+CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=2 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 --max_restarts=0 train.py
 Why CUDA_DEVICE_MAX_CONNECTIONS=1: 
 1. https://github.com/NVIDIA/Megatron-LM/blob/8b0a9b32470e84eb0dbefc557b4e4d4ca342cc65/megatron/core/tensor_parallel/layers.py#L445-L446,
 2. https://zhuanlan.zhihu.com/p/706805407
@@ -8,9 +9,10 @@ Why CUDA_DEVICE_MAX_CONNECTIONS=1:
 
 
 """
+from contextlib import nullcontext
 import time
 from src.model.llama3 import LLaMA
-from src.parallel.tensor_parallel.initialize import initialize_process_groups, initialize_torch_distributed
+from src.parallel.tensor_parallel.initialize import get_data_parallel_group, get_data_parallel_rank, get_data_parallel_world_size, initialize_process_groups, initialize_torch_distributed
 from tools.utils import get_num_params, log_info, log_training_steps, num_to_str, setup_logger, load_env_file
 import torch 
 from dataclasses import dataclass
@@ -22,12 +24,12 @@ import torch.optim as optim
 import torch.distributed as dist
 from datasets import load_dataset
 from src.data.data import tokenize_dataset, get_dataloader
+from torch.utils.data import DistributedSampler
 
 # Set env variables
 load_env_file('.env')
 
 # to match the output of transformers model, set MERGED_QKV_WEIGHT to 0 is necessary
-os.environ['OMP_NUM_THREADS'] = '4'
 os.environ['DATA_TYPE'] = 'bfloat16' # bfloat16/float32
 os.environ['MERGED_QKV_WEIGHT'] = '0' # 1/0
 os.environ['MERGED_GATE_UP_WEIGHT'] = '0' # 1/0
@@ -41,6 +43,11 @@ profiler_output_dir = ".cache/profile"
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 dtype = torch.bfloat16 if os.getenv('DATA_TYPE', 'bfloat16') == 'bfloat16' else torch.float32
 
+# scaler not support for bfloat16 yet. 
+# use_amp = True 
+# ctx = nullcontext() if device.type == 'cpu' else torch.autocast(device_type=device.type , dtype=dtype, enabled=use_amp)
+# scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+
 # Set the seed for reproducibility
 seed = 42
 torch.manual_seed(seed)
@@ -51,37 +58,24 @@ class train_config:
     num_epochs: int = 5
     total_steps: int = 300  # -1 for full dataset
     accumulation_steps: int = 4
-    lr: float = 3e-5
+    lr: float = 3e-4
     batch_size: int = 64
-    adam_weight_decay: float = 0.1
+    adam_weight_decay: float = 0.0
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
     adam_eps: float = 1.0e-10
 
+@dataclass
+class parallel_config:
+    model_parallel_size: int = 1
+    pipeline_parallel_size: int = 1
+    context_parallel_size: int = 1
+    data_parallel_size: int = 1
+
 ## Initialize model, loss function, and optimizer
-## GPT2 base model
-# tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
-# @dataclass
-# class LLaMAConfig:
-#     max_position_embeddings: int = 1024
-#     hidden_dim: int = 768
-#     intermediate_dim: int = 3072
-#     vocab_size = 50304 #  https://x.com/karpathy/status/1621578354024677377 still true.  50304 ~30% speedup
-#     num_key_values: int = 4
-#     num_heads: int = 12
-#     num_layers: int = 12
-#     rope_theta: float = 500000.0
-#     torch_dtype: str = 'bfloat16'
-#     rms_norm_eps: float = 1e-5
-
-
-# train_config = train_config(lr=3e-4,accumulation_steps=4, batch_size=64)
-
 ## LLaMA3 8b model
 ## Note: For the convergence speed is slow compared to 180M model. Need more test.
 # # https://huggingface.co/meta-llama/Meta-Llama-3.1-8B/blob/main/config.json
-# tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf")
 @dataclass
 class LLaMAConfig:
     max_position_embeddings: int = 8192
@@ -94,29 +88,41 @@ class LLaMAConfig:
     rope_theta: float = 500000.0
     torch_dtype: str = 'bfloat16'
     rms_norm_eps: float = 1e-5
-train_config = train_config(lr=3e-4,accumulation_steps=1, batch_size=4)
-
-model_config = LLaMAConfig(max_position_embeddings=4096, intermediate_dim=11008, vocab_size=32000, num_key_values=32) # LLaMA 2 7b 
-# model_config = LLaMAConfig()
-# model_confif = LLaMAConfig(max_position_embeddings=1024, hidden_dim=768, intermediate_dim=3072, vocab_size=50304, num_key_values=4, num_heads=12, num_layers=12) # GPT2
+# train_config = train_config(lr=3e-4,accumulation_steps=1, batch_size=4)
+# LLaMA2 7b 
+# tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf")
+# model_config = LLaMAConfig(max_position_embeddings=4096, intermediate_dim=11008, vocab_size=32000, num_key_values=32) 
+# LLaMA3 8b
+# model_config = LLaMAConfig() 
+# tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
+# GPT2
+tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
+model_config = LLaMAConfig(max_position_embeddings=1024, hidden_dim=768, intermediate_dim=3072, vocab_size=50304, num_key_values=4, num_heads=12, num_layers=12) # https://x.com/karpathy/status/1621578354024677377 still true.  50304 ~30% speedup
+train_config = train_config(lr=3e-4,accumulation_steps=4, batch_size=16)
+parallel_config = parallel_config(model_parallel_size = 1, data_parallel_size = 2)
 
 dataset = load_dataset("roneneldan/TinyStories", split='train')
 tokenized_dataset = tokenize_dataset(dataset, tokenizer, text_column_name = 'text', sequence_length = model_config.max_position_embeddings, dataset_processing_num_proc_per_process = 64)
 
-# DataLoader
-shuffle = False
-dataloader = get_dataloader(tokenized_dataset, train_config.batch_size, shuffle)
-
 # Initialize torch distributed, process groups
 initialize_torch_distributed()
-initialize_process_groups(model_parallel_size=4, pipeline_parallel_size=1, context_parallel_size=1, data_parallel_size=1)
+initialize_process_groups(model_parallel_size=parallel_config.model_parallel_size, pipeline_parallel_size=1, context_parallel_size=1, data_parallel_size=parallel_config.data_parallel_size)
 world_size = dist.get_world_size()
+
+# DataLoader
+shuffle = False
+sampler = DistributedSampler(tokenized_dataset, num_replicas=get_data_parallel_world_size(), rank=get_data_parallel_rank(), shuffle=shuffle) # without distributed sampler, the data will be duplicated in each GPU of the data parallel group 
+dataloader = get_dataloader(tokenized_dataset, train_config.batch_size, shuffle=shuffle, sampler=sampler)
 
 # Model
 model = LLaMA(model_config).to(dtype).to(device)
 
+# DDP
+if get_data_parallel_world_size() > 1:
+    model = torch.nn.parallel.DistributedDataParallel(model, process_group=get_data_parallel_group())
+
 # Loss function and optimizer
-criterion = nn.CrossEntropyLoss()  # or any other suitable loss function
+criterion = nn.CrossEntropyLoss()  # reduction='mean' by default 
 optimizer = optim.Adam(model.parameters(), lr=train_config.lr, weight_decay=train_config.adam_weight_decay, betas=(train_config.adam_beta1, train_config.adam_beta2), eps=train_config.adam_eps)
 
 # Initialize the logger 
@@ -131,7 +137,7 @@ num_params = get_num_params(model,logger)
 # Initilize the step counter
 step = 0
 total_tokens_processed = 0
-tokens_per_step = train_config.batch_size * model_config.max_position_embeddings * train_config.accumulation_steps
+tokens_per_step = train_config.batch_size * model_config.max_position_embeddings * train_config.accumulation_steps * parallel_config.data_parallel_size
 start_time = time.time()  # Start time measurement
 
 use_profiler = os.getenv('USE_PROFILER', '0') == '1'
@@ -183,7 +189,7 @@ if use_profiler:
             step += 1
             
             # Print the loss for each step
-            tokens_processed = B * T  # B is batch size, T is sequence length
+            tokens_processed = B * T # B is batch size, T is sequence length
             total_tokens_processed += tokens_processed
             
             # Print the loss for each step
@@ -200,17 +206,12 @@ else:
     for epoch in range(train_config.num_epochs):
         for data in dataloader:
             input_ids, label_ids = data['input_ids'].to(device) , data['label_ids'].to(device)
-            
-            # Forward pass
-            outputs = model(input_ids)
-            
-            # adjust shape for the loss
-            B, T, C = outputs.size()
-            outputs = outputs.view(B*T, C)
+            B, T = input_ids.size()
             label_ids = label_ids.view(B*T)
-            
-            # Compute the loss
-            loss = criterion(outputs, label_ids) / train_config.accumulation_steps
+            # Forward pass with mixed precision
+            outputs = model(input_ids)
+            outputs = outputs.view(B*T, -1) # adjust shape for the loss
+            loss = criterion(outputs, label_ids) / train_config.accumulation_steps 
 
             # Backward pass and optimize
             loss.backward()
@@ -230,23 +231,30 @@ else:
             
                 # Print the loss for each step
                 log_interval = 1
-                if step % log_interval == 0 and dist.get_rank() == 0:
+                if step % log_interval == 0:
+                    # Avg loss from all DP processes
+                    if parallel_config.data_parallel_size > 1:
+                        loss_tensor = torch.tensor([loss.item()], device=device)
+                        dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
+                    avg_loss = loss_tensor.item()
+                    
                     current_time = time.time()
                     time_taken = current_time - start_time
                     tokens_per_second = tokens_per_step * log_interval / time_taken
-                    flops_per_gpu = model.get_flops(train_config.accumulation_steps, time_taken, num_params)/world_size
+                    flops_per_gpu = model.module.get_flops(train_config.accumulation_steps, time_taken, num_params)/world_size
                     start_time = current_time
                     
-                    logger.info(f"Step [{step}], Epoch [{epoch+1}/{train_config.num_epochs}], Loss: {loss.item() * train_config.accumulation_steps:.4f}, "
-                        f"Global batch size: {num_to_str(tokens_per_step)}, "
-                        f"Accumulated tokens: {num_to_str(total_tokens_processed)}, "
-                        f"Tokens/s: {num_to_str(tokens_per_second)}, "
-                        f"Tokens/s/GPU: {num_to_str(tokens_per_second/world_size)}, "
-                        f"FLOPS/GPU: {num_to_str(flops_per_gpu)}, " 
-                        f"MFU: {num_to_str(flops_per_gpu/989e10)}% " # H100 GPU bfloat16 peak flops： 989e12
-                    )
-                    if step <= 10:
-                        logger.info(f"Memory Reserved: {torch.cuda.memory_reserved(device) / 1024 ** 3:.2f} GB")
+                    if dist.get_rank() == 0:
+                        logger.info(f"Step [{step}], Epoch [{epoch+1}/{train_config.num_epochs}], Loss: {avg_loss * train_config.accumulation_steps:.4f}, "
+                            f"Global batch size: {num_to_str(tokens_per_step)}, "
+                            f"Accumulated tokens: {num_to_str(total_tokens_processed)}, "
+                            f"Tokens/s: {num_to_str(tokens_per_second)}, "
+                            f"Tokens/s/GPU: {num_to_str(tokens_per_second/world_size)}, "
+                            f"FLOPS/GPU: {num_to_str(flops_per_gpu)}, " 
+                            f"MFU: {num_to_str(flops_per_gpu/989e10)}% " # H100 GPU bfloat16 peak flops： 989e12
+                        )
+                        if step <= 10:
+                            logger.info(f"Memory Reserved: {torch.cuda.memory_reserved(device) / 1024 ** 3:.2f} GB")
 
                 # Check if the training should be stopped
                 if train_config.total_steps != -1 and step >= train_config.total_steps:
@@ -255,7 +263,8 @@ else:
         if finished:
             break
         logger.info(f'Epoch [{epoch+1}/{train_config.num_epochs}], Loss: {loss.item():.4f}')
-    logger.info("Training complete.")
+    if dist.get_rank() == 0:
+        logger.info("Training complete.")
 
 
 

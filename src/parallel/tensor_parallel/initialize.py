@@ -35,7 +35,6 @@ def initialize_process_groups(
     
     assert pipeline_parallel_size == 1, "pipeline parallel is not supported yet"
     assert context_parallel_size == 1, "context parallel is not supported yet"
-    assert data_parallel_size == 1, "data parallel is not supported yet"
     assert model_parallel_size > 0
     assert torch.distributed.is_initialized()
     world_size = torch.distributed.get_world_size()
