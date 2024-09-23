@@ -111,7 +111,10 @@ world_size = dist.get_world_size()
 
 # DataLoader
 shuffle = False
-sampler = DistributedSampler(tokenized_dataset, num_replicas=get_data_parallel_world_size(), rank=get_data_parallel_rank(), shuffle=shuffle) # without distributed sampler, the data will be duplicated in each GPU of the data parallel group 
+if parallel_config.data_parallel_size > 1:
+    sampler = DistributedSampler(tokenized_dataset, num_replicas=get_data_parallel_world_size(), rank=get_data_parallel_rank(), shuffle=shuffle) # without distributed sampler, the data will be duplicated in each GPU of the data parallel group.  
+else:
+    sampler = None
 dataloader = get_dataloader(tokenized_dataset, train_config.batch_size, shuffle=shuffle, sampler=sampler)
 
 # Model
@@ -208,6 +211,11 @@ else:
             input_ids, label_ids = data['input_ids'].to(device) , data['label_ids'].to(device)
             B, T = input_ids.size()
             label_ids = label_ids.view(B*T)
+            
+            # disable the gradient sync for all but the last micro_step.
+            # https://github.com/karpathy/nanoGPT/blob/9755682b981a45507f6eb9b11eadef8cb83cebd5/train.py#L293-L298
+            model.require_backward_grad_sync = (gradient_accumulation_counter == train_config.accumulation_steps - 1)
+            
             # Forward pass with mixed precision
             outputs = model(input_ids)
             outputs = outputs.view(B*T, -1) # adjust shape for the loss
