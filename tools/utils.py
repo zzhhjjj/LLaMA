@@ -70,9 +70,10 @@ def setup_logger(file_path=None):
 
     return logger
 
-def log_info(model_config, train_config, logger):
+def log_info(model_config, train_config, parallel_congig, logger):
     log_config(model_config, logger, "LLaMAConfig:")
     log_config(train_config, logger,"TrainConfig:")
+    log_config(parallel_congig, logger, "ParallelConfig:")
 
 def get_num_params(model,logger):
     # Calculate the number of parameters

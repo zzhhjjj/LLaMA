@@ -1,6 +1,6 @@
 """Training script for LLaMA model.
 Command to run this script:
-CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun    --nproc_per_node=2    --nnodes=1    --rdzv_backend=c10d    --rdzv_endpoint=localhost:29400    --max_restarts=0    --tee=3    train.py
+CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun    --nproc_per_node=4    --nnodes=1    --rdzv_backend=c10d    --rdzv_endpoint=localhost:29400    --max_restarts=0    --tee=3    train.py
 CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=2 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 --max_restarts=0 train.py
 Why CUDA_DEVICE_MAX_CONNECTIONS=1: 
 1. https://github.com/NVIDIA/Megatron-LM/blob/8b0a9b32470e84eb0dbefc557b4e4d4ca342cc65/megatron/core/tensor_parallel/layers.py#L445-L446,
@@ -25,6 +25,8 @@ import torch.distributed as dist
 from datasets import load_dataset
 from src.data.data import tokenize_dataset, get_dataloader
 from torch.utils.data import DistributedSampler
+from src.parallel.data_parallel.data_parallel import DataParallel
+from dataclasses import asdict
 
 # Set env variables
 load_env_file('.env')
@@ -36,12 +38,15 @@ os.environ['MERGED_GATE_UP_WEIGHT'] = '0' # 1/0
 os.environ['TRITONRMSNORM'] = '1'
 os.environ['FLASH_ROPE'] = '1'
 os.environ['ATTENTION'] = 'FLASH' # SDPA/FLASH
-os.environ['USE_PROFILER'] = '0' # 1/0
+os.environ['USE_PROFILER'] = '1' # 1/0
 profiler_output_dir = ".cache/profile"
 
 # set device and dtype
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 dtype = torch.bfloat16 if os.getenv('DATA_TYPE', 'bfloat16') == 'bfloat16' else torch.float32
+
+# whether use wandb 
+wandb_log = True
 
 # scaler not support for bfloat16 yet. 
 # use_amp = True 
@@ -98,8 +103,8 @@ class LLaMAConfig:
 # GPT2
 tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
 model_config = LLaMAConfig(max_position_embeddings=1024, hidden_dim=768, intermediate_dim=3072, vocab_size=50304, num_key_values=4, num_heads=12, num_layers=12) # https://x.com/karpathy/status/1621578354024677377 still true.  50304 ~30% speedup
-train_config = train_config(lr=3e-4,accumulation_steps=4, batch_size=16)
-parallel_config = parallel_config(model_parallel_size = 1, data_parallel_size = 2)
+train_config = train_config(lr=3e-4, accumulation_steps=8, batch_size=64, total_steps=10)
+parallel_config = parallel_config(model_parallel_size = 1, data_parallel_size = 4)
 
 dataset = load_dataset("roneneldan/TinyStories", split='train')
 tokenized_dataset = tokenize_dataset(dataset, tokenizer, text_column_name = 'text', sequence_length = model_config.max_position_embeddings, dataset_processing_num_proc_per_process = 64)
@@ -108,6 +113,7 @@ tokenized_dataset = tokenize_dataset(dataset, tokenizer, text_column_name = 'tex
 initialize_torch_distributed()
 initialize_process_groups(model_parallel_size=parallel_config.model_parallel_size, pipeline_parallel_size=1, context_parallel_size=1, data_parallel_size=parallel_config.data_parallel_size)
 world_size = dist.get_world_size()
+master_process = dist.get_rank() == 0 # master process is the process do the logs
 
 # DataLoader
 shuffle = False
@@ -122,7 +128,8 @@ model = LLaMA(model_config).to(dtype).to(device)
 
 # DDP
 if get_data_parallel_world_size() > 1:
-    model = torch.nn.parallel.DistributedDataParallel(model, process_group=get_data_parallel_group())
+    model = DataParallel(model, process_group=get_data_parallel_group()) # own implementation
+    # model = torch.nn.parallel.DistributedDataParallel(model, process_group=get_data_parallel_group())
 
 # Loss function and optimizer
 criterion = nn.CrossEntropyLoss()  # reduction='mean' by default 
@@ -133,14 +140,31 @@ log_path = "tools/benchmark/loss/loss.txt"
 logger = setup_logger(log_path)
 
 # Log some information 
-log_info(model_config,train_config,logger)
+log_info(model_config,train_config,parallel_config, logger)
 log_training_steps(train_config.num_epochs, train_config.total_steps, dataloader)
 num_params = get_num_params(model,logger)
+total_tokens_processed = 0
+tokens_per_step = train_config.batch_size * model_config.max_position_embeddings * train_config.accumulation_steps * parallel_config.data_parallel_size
+
+# wandb to save the training logs
+if wandb_log and master_process:
+    import wandb
+    from datetime import datetime
+    current_time = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    run_name = f"GBS_{num_to_str(tokens_per_step)}_dp{parallel_config.data_parallel_size}_tp{parallel_config.model_parallel_size}_cp{parallel_config.context_parallel_size}_pp{parallel_config.pipeline_parallel_size}_{current_time}"
+    wandb.init(
+        project="llama",
+        name=run_name,
+        config={
+            "seed": seed,
+            **asdict(train_config), 
+            **asdict(parallel_config),  
+            **asdict(model_config), 
+        }
+    )
 
 # Initilize the step counter
 step = 0
-total_tokens_processed = 0
-tokens_per_step = train_config.batch_size * model_config.max_position_embeddings * train_config.accumulation_steps * parallel_config.data_parallel_size
 start_time = time.time()  # Start time measurement
 
 use_profiler = os.getenv('USE_PROFILER', '0') == '1'
@@ -196,7 +220,7 @@ if use_profiler:
             total_tokens_processed += tokens_processed
             
             # Print the loss for each step
-            if step % 10 == 0 and dist.get_rank() == 0:
+            if step % 10 == 0 and master_process:
                 print(f'Step [{step}], Loss: {loss.item():.4f}, Tokens/s : {total_tokens_processed / (time.time() - start_time):.2f}')
                 if step <= 50:
                     print(f"Memory Reserved: {torch.cuda.memory_reserved(device) / 1024 ** 3:.2f} GB")
@@ -244,15 +268,15 @@ else:
                     if parallel_config.data_parallel_size > 1:
                         loss_tensor = torch.tensor([loss.item()], device=device)
                         dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
-                    avg_loss = loss_tensor.item()
+                    avg_loss = loss_tensor.item() if parallel_config.data_parallel_size > 1 else loss.item()
                     
                     current_time = time.time()
                     time_taken = current_time - start_time
                     tokens_per_second = tokens_per_step * log_interval / time_taken
-                    flops_per_gpu = model.module.get_flops(train_config.accumulation_steps, time_taken, num_params)/world_size
+                    flops_per_gpu = model.module.get_flops(train_config.accumulation_steps, time_taken, num_params)/world_size if get_data_parallel_world_size() > 1 else model.get_flops(train_config.accumulation_steps, time_taken, num_params)
                     start_time = current_time
                     
-                    if dist.get_rank() == 0:
+                    if master_process:
                         logger.info(f"Step [{step}], Epoch [{epoch+1}/{train_config.num_epochs}], Loss: {avg_loss * train_config.accumulation_steps:.4f}, "
                             f"Global batch size: {num_to_str(tokens_per_step)}, "
                             f"Accumulated tokens: {num_to_str(total_tokens_processed)}, "
@@ -263,6 +287,20 @@ else:
                         )
                         if step <= 10:
                             logger.info(f"Memory Reserved: {torch.cuda.memory_reserved(device) / 1024 ** 3:.2f} GB")
+                        
+                        # Log the training metrics to wandb as well 
+                        if wandb_log:
+                            wandb.log({
+                                "step": step,
+                                "epoch": epoch + 1,
+                                "loss": avg_loss * train_config.accumulation_steps,
+                                "global_batch_size": tokens_per_step,
+                                "total_tokens_processed": total_tokens_processed,
+                                "tokens_per_second": tokens_per_second,
+                                "tokens_per_second_per_gpu": tokens_per_second / world_size,
+                                "flops_per_gpu": flops_per_gpu,
+                                "mfu": flops_per_gpu / 989e10,  # H100 GPU bfloat16 peak flops： 989e12
+                            })
 
                 # Check if the training should be stopped
                 if train_config.total_steps != -1 and step >= train_config.total_steps:
@@ -271,7 +309,7 @@ else:
         if finished:
             break
         logger.info(f'Epoch [{epoch+1}/{train_config.num_epochs}], Loss: {loss.item():.4f}')
-    if dist.get_rank() == 0:
+    if master_process:
         logger.info("Training complete.")
 
 
