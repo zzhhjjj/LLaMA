@@ -38,7 +38,7 @@ os.environ['MERGED_GATE_UP_WEIGHT'] = '0' # 1/0
 os.environ['TRITONRMSNORM'] = '1'
 os.environ['FLASH_ROPE'] = '1'
 os.environ['ATTENTION'] = 'FLASH' # SDPA/FLASH
-os.environ['USE_PROFILER'] = '1' # 1/0
+os.environ['USE_PROFILER'] = '0' # 1/0
 profiler_output_dir = ".cache/profile"
 
 # set device and dtype
@@ -103,7 +103,7 @@ class LLaMAConfig:
 # GPT2
 tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
 model_config = LLaMAConfig(max_position_embeddings=1024, hidden_dim=768, intermediate_dim=3072, vocab_size=50304, num_key_values=4, num_heads=12, num_layers=12) # https://x.com/karpathy/status/1621578354024677377 still true.  50304 ~30% speedup
-train_config = train_config(lr=3e-4, accumulation_steps=8, batch_size=64, total_steps=10)
+train_config = train_config(lr=3e-4, accumulation_steps=4, batch_size=64, total_steps=300)
 parallel_config = parallel_config(model_parallel_size = 1, data_parallel_size = 4)
 
 dataset = load_dataset("roneneldan/TinyStories", split='train')
@@ -151,7 +151,8 @@ if wandb_log and master_process:
     import wandb
     from datetime import datetime
     current_time = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    run_name = f"GBS_{num_to_str(tokens_per_step)}_dp{parallel_config.data_parallel_size}_tp{parallel_config.model_parallel_size}_cp{parallel_config.context_parallel_size}_pp{parallel_config.pipeline_parallel_size}_{current_time}"
+    # run_name = f"GBS_{num_to_str(tokens_per_step)}_dp{parallel_config.data_parallel_size}_tp{parallel_config.model_parallel_size}_cp{parallel_config.context_parallel_size}_pp{parallel_config.pipeline_parallel_size}_{current_time}"
+    run_name = f"GBS_{num_to_str(tokens_per_step)}_dp{parallel_config.data_parallel_size}_tp{parallel_config.model_parallel_size}_{current_time}"
     wandb.init(
         project="llama",
         name=run_name,
