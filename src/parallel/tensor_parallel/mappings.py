@@ -1,6 +1,6 @@
 import torch.distributed as dist
 import torch
-from .initialize import get_model_parallel_group 
+from ..initialize import get_model_parallel_group 
 from .utils import split_tensor_along_last_dim
 
 # Reference : Fairscale, Megatron-LM

@@ -12,7 +12,7 @@ Why CUDA_DEVICE_MAX_CONNECTIONS=1:
 from contextlib import nullcontext
 import time
 from src.model.llama3 import LLaMA
-from src.parallel.tensor_parallel.initialize import get_data_parallel_group, get_data_parallel_rank, get_data_parallel_world_size, initialize_process_groups, initialize_torch_distributed
+from src.parallel.initialize import get_data_parallel_group, get_data_parallel_rank, get_data_parallel_world_size, initialize_process_groups, initialize_torch_distributed
 from tools.utils import get_num_params, log_info, log_training_steps, num_to_str, setup_logger, load_env_file
 import torch 
 from dataclasses import dataclass
@@ -26,6 +26,7 @@ from datasets import load_dataset
 from src.data.data import tokenize_dataset, get_dataloader
 from torch.utils.data import DistributedSampler
 from src.parallel.data_parallel.data_parallel import DataParallel
+from src.parallel.data_parallel.data_parallel_bucket import DataParallel as DataParallel_Bucket
 from dataclasses import asdict
 
 # Set env variables
@@ -128,7 +129,8 @@ model = LLaMA(model_config).to(dtype).to(device)
 
 # DDP
 if get_data_parallel_world_size() > 1:
-    model = DataParallel(model, process_group=get_data_parallel_group()) # own implementation
+    # model = DataParallel(model, process_group=get_data_parallel_group()) # easiest implementation
+    model = DataParallel_Bucket(model, process_group=get_data_parallel_group(), bucket_cap_mb=25) # DDP implementation with bucket
     # model = torch.nn.parallel.DistributedDataParallel(model, process_group=get_data_parallel_group())
 
 # Loss function and optimizer
@@ -255,6 +257,11 @@ else:
             if gradient_accumulation_counter % train_config.accumulation_steps == 0:
                 optimizer.step()         # Perform optimizer step
                 optimizer.zero_grad()    # Zero the parameter gradients
+                
+                # Need to set the bucket to zero. I can avoid this by adding if condition in DDP class, but it's necessary for PP anyway. 
+                # https://github.com/pytorch/pytorch/blob/c0deec120fc1c97cf6439772df5d5bebfa736e4c/torch/nn/parallel/distributed.py#L1096-L1104
+                if hasattr(model, 'reset'):
+                    model.reset()
             
                 # Increment step counter
                 step += 1

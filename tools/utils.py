@@ -5,7 +5,7 @@ from functools import wraps
 import time
 import logging
 import torch
-from src.parallel.tensor_parallel.initialize import get_model_parallel_group, get_model_parallel_world_size, get_pipeline_parallel_group, get_pipeline_parallel_world_size
+from src.parallel.initialize import get_model_parallel_group, get_model_parallel_world_size, get_pipeline_parallel_group, get_pipeline_parallel_world_size
 import torch.distributed as dist
 from dataclasses import asdict
 

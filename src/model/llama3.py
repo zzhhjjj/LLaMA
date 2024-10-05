@@ -1,7 +1,7 @@
 import os
 from src.generation.decode import KVcache
 from src.nn.layer_norm import LlamaRMSNorm, TritonRMSNorm
-from src.parallel.tensor_parallel.initialize import get_model_parallel_world_size
+from src.parallel.initialize import get_model_parallel_world_size
 from src.parallel.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding
 import torch 
 from dataclasses import dataclass
