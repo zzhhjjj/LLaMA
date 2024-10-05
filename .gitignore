@@ -7,3 +7,5 @@ llama.egg-info
 *.txt
 .env
 wandb
+logs
+launch_job.slurm
