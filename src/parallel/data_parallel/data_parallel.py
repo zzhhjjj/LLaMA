@@ -5,6 +5,14 @@ from torch import nn
 
 class DataParallel(nn.Module):
     def __init__(self, module, process_group):
+        """
+        Initializes the DataParallel wrapper for a given module.
+
+        Args:
+            module (nn.Module): The model to be wrapped for data parallelism.
+            process_group (torch.distributed.ProcessGroup): The process group used for gradient synchronization. 
+                                                            It could be a data parallel or context parallel group.
+        """
         super().__init__()
         self.module = module
         self.process_group = process_group # process group for gradient synchronization. could be data parallel group and context parallel group
@@ -16,12 +24,18 @@ class DataParallel(nn.Module):
         return self.module(*inputs, **kwargs)
     
     def register_backward_hook(self, hook):
+        """
+        Registers a backward hook for all parameters of the model that require gradients.    
+        """
         for p in self.module.parameters():
             if p.requires_grad is True:
                 p.register_hook(hook)
                 
     def _allreduce_grads(self, grad):
-        # no synchronization required(except for last epoch of gradient accumulation)
+        """
+        Performs an all-reduce operation to synchronize gradients across multiple processes.    
+        """
+        # No synchronization needed during gradient accumulation, except at the final accumulation step.
         # 324K tokens/s/gpu -> 334K tokens/s/gpu
         if self.require_backward_grad_sync:
             dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=self.process_group)
@@ -30,7 +44,11 @@ class DataParallel(nn.Module):
     
     @contextlib.contextmanager
     def no_sync(self):
-        """A context manager to disable gradient synchronization."""
+        """
+        A context manager to temporarily disable gradient synchronization. 
+        This is useful for performing multiple backward passes during gradient accumulation without synchronizing 
+        gradients in between.
+        """
         self.require_backward_grad_sync = False
         yield
         self.require_backward_grad_sync = True

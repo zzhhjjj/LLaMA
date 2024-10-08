@@ -289,7 +289,7 @@ else:
                     current_time = time.time()
                     time_taken = current_time - start_time
                     tokens_per_second = tokens_per_step * log_interval / time_taken
-                    flops_per_gpu = model.module.get_flops(train_config.accumulation_steps, time_taken, num_params)/world_size if get_data_parallel_world_size() > 1 else model.get_flops(train_config.accumulation_steps, time_taken, num_params)
+                    flops_per_gpu = model.get_flops(train_config.accumulation_steps, time_taken, num_params)/world_size 
                     start_time = current_time
                     
                     if master_process:                            

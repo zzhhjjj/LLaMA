@@ -226,6 +226,7 @@ class LLaMA(nn.Module):
     
     # https://github.com/karpathy/nanoGPT/blob/9755682b981a45507f6eb9b11eadef8cb83cebd5/model.py#L289-L303
     # https://zhuanlan.zhihu.com/p/667489780 
+    # TODO: Very low. Need to check the formula.
     def get_flops(self, fwdbwd_per_iter, dt, num_params):
         L, H, T = self.num_layers , self.hidden_dim, self.max_position_embeddings
         flops_per_fwdbwd = 6 * num_params * T + 12* L* H* T ** 2
