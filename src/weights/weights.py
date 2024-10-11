@@ -1,11 +1,16 @@
 from concurrent.futures import ThreadPoolExecutor
+import glob
 import os
 from safetensors import safe_open
+from safetensors.torch import save_file
+from src.parallel.initialize import get_data_parallel_rank, get_data_parallel_world_size, get_model_parallel_rank, get_model_parallel_world_size
 import torch
 import pickle
 from tqdm import tqdm
+import torch.distributed as dist
 
 
+# Functions for load from transformer model
 def load_weights_to_dict(path):
     """Load all the weights to the disk, return a dictionary containing all the tensors.
 
@@ -97,6 +102,100 @@ def copy_weights_to_model(model, all_tensors):
         list(tqdm(executor.map(lambda task: copy_tensor(*task), tasks), total=len(tasks), desc="Copying weights"))
 
 
+## Function for save and load weights below
+# save: 
+# 1. Let each process save its own weights
+# 2. Merge shared weights (will do it later, by using the parameter names)
+#    For now just suppose TP will not change, so each model load the corresponding TP weights
+# load:
+# 1. let each process load its own weights
+
+def save_weights(model, file_prefix):
+    """
+    Save all the weights to the disk.
+    """
+    # hardcode the parameter names 
+    column_parallel_params = ['q_proj', 'k_proj', 'v_proj', 'up_proj', 'gate_proj', 'word_embedding', 'lm_head'] # split on the 0th dimension
+    row_parallel_params = ['out_proj', 'down_proj'] # split on the 1st dimension
+    
+    # Get tensor parallel rank and world size
+    tp_rank = get_model_parallel_rank()
+    tp_world_size = get_model_parallel_world_size()
+    dp_rank = get_data_parallel_rank()
+    dp_world_size = get_data_parallel_world_size()
+    
+    if dp_world_size > 1:
+        model = model.module # unwarp from DDP
+    
+    # DP rank = 0 saves the sharded weights()
+    # DP rank = 0 + TP rank = 0 saves the non-sharded weights
+    if dp_rank == 0:
+        # Dictionary to store this rank's parameters
+        unsharded_state_dict = {}
+        sharded_state_dict = {}
+        for param_name, param in model.named_parameters():
+            if any(name in param_name for name in column_parallel_params) or any(name in param_name for name in row_parallel_params):
+                sharded_state_dict[param_name] = param.data.cpu()
+                # print(f"Sharded: {param_name}")
+            else:
+                if tp_rank == 0:
+                    unsharded_state_dict[param_name] = param.data.cpu()
+                    # print(f"Non-Parallel: {param_name}")
+
+        # Ensure the directory exists
+        directory = os.path.dirname(file_prefix)
+        os.makedirs(directory, exist_ok=True)
+            
+        shared_file_name = f"{file_prefix}sharded_tp_rank_{tp_rank}_tp_world_size_{tp_world_size}.safetensors"
+        save_file(sharded_state_dict, shared_file_name)
+        
+        if tp_rank == 0:
+            unsharded_file_name = f"{file_prefix}unsharded.safetensors"
+            save_file(unsharded_state_dict, unsharded_file_name)
+        
+
+def load_weights(model, file_prefix):
+    """
+    Load the weights from the disk for the current TP rank.
+    Each TP rank loads the sharded weights relevant to its rank.
+    """
+    # two type of directory: 
+    # 1. weights under the file_prefix
+    # 2. weights under the file_prefix/epochs (not implemented yet)
+    if not glob.glob(os.path.join(file_prefix, "*.safetensors")):
+        if dist.get_rank() == 0:
+            print(f"No weights found in {file_prefix} Skipping weight loading.")
+        return
+    if dist.get_rank() == 0:
+        print(f"Starting to load weights.")
+    # Get tensor parallel rank and world size
+    tp_rank = get_model_parallel_rank()
+    tp_world_size = get_model_parallel_world_size()
+
+    # Dictionary to hold the parameters to be loaded for this rank
+    loaded_state_dict = {}
+
+    # Load the sharded (shared) weights for this TP rank
+    sharded_file = f"{file_prefix}sharded_tp_rank_{tp_rank}_tp_world_size_{tp_world_size}.safetensors"
+    print(f"Loading sharded weights for TP rank {tp_rank} from {sharded_file}")
+    
+    assert os.path.exists(sharded_file), f"File {sharded_file} does not exist. For now, we assume that TP degree is fixed."
+    with safe_open(sharded_file, framework="pt") as f:
+        for param_name in f.keys():
+            loaded_state_dict[param_name] = f.get_tensor(param_name)
+
+        
+    unsharded_file = f"{file_prefix}unsharded.safetensors"
+    with safe_open(unsharded_file, framework="pt") as f:
+        for param_name in f.keys():
+            loaded_state_dict[param_name] = f.get_tensor(param_name)
+
+    # Load the weights into the model's state_dict
+    model.load_state_dict(loaded_state_dict, strict=False)
+    print(f"Weights successfully loaded for TP rank {tp_rank}.")
+
+
+            
 # def copy_weights_to_model(model, all_tensors):
 #     """Copy the weights from the dictionary to the model
 

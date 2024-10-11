@@ -9,3 +9,4 @@ llama.egg-info
 wandb
 logs
 launch_job.slurm
+tmp

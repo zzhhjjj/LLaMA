@@ -1,12 +1,12 @@
 """Training script for LLaMA model.
 Command to run this script:
 CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun    --nproc_per_node=4    --nnodes=1    --rdzv_backend=c10d    --rdzv_endpoint=localhost:29400    --max_restarts=0    --tee=3    train.py
-CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=2 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 --max_restarts=0 train.py
+CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=4 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 --max_restarts=0 train.py --ckpt tmp/ckpt1/100/
+# save checkpoint
+CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun    --nproc_per_node=4    --nnodes=1    --rdzv_backend=c10d    --rdzv_endpoint=localhost:29400    --max_restarts=0    --tee=3    train.py --ckpt tmp/ckpt1/100/
 Why CUDA_DEVICE_MAX_CONNECTIONS=1: 
 1. https://github.com/NVIDIA/Megatron-LM/blob/8b0a9b32470e84eb0dbefc557b4e4d4ca342cc65/megatron/core/tensor_parallel/layers.py#L445-L446,
 2. https://zhuanlan.zhihu.com/p/706805407
-
-
 
 """
 import argparse
@@ -17,9 +17,10 @@ from src.parallel.initialize import get_data_parallel_group, get_data_parallel_r
 from tools.utils import get_num_params, log_info, log_training_steps, num_to_str, setup_logger, load_env_file
 import torch 
 from dataclasses import dataclass
-from src.weights.weights import load_weights_to_dict, copy_weights_to_model
+from src.weights.weights import save_weights, load_weights
 from transformers import AutoTokenizer
 import os
+import glob
 import torch.nn as nn
 import torch.optim as optim
 import torch.distributed as dist
@@ -50,9 +51,11 @@ dtype = torch.bfloat16 if os.getenv('DATA_TYPE', 'bfloat16') == 'bfloat16' else 
 # Parse the command line arguments
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dp", type=int, help="Data parallel size", default=4)
-    parser.add_argument("--tp", type=int, help="Tensor parallel size", default=1)
+    parser.add_argument("--dp", type=int, help="Data parallel size", default=2)
+    parser.add_argument("--tp", type=int, help="Tensor parallel size", default=2)
     parser.add_argument("--wandb_log", type=bool, help="Whether to use wandb", default=False)
+    parser.add_argument("--ckpt", type=str, help="Path to the checkpoint folder", default=None)
+    # parser.add_argument("--profiler", type=bool, help="Whether to use profiler", default=False)
     return parser.parse_args()
 
 args = get_args()
@@ -71,6 +74,7 @@ torch.manual_seed(seed)
 class train_config:
     num_epochs: int = 5
     total_steps: int = 300  # -1 for full dataset
+    checkpoint_interval: int = 10 # <0 for no checkpointing
     accumulation_steps: int = 4
     lr: float = 3e-4
     batch_size: int = 64
@@ -135,19 +139,26 @@ dataloader = get_dataloader(tokenized_dataset, train_config.batch_size, shuffle=
 # Model
 model = LLaMA(model_config).to(dtype).to(device)
 
+# Initialize the logger 
+log_path = "tools/benchmark/loss/loss.txt"
+logger = setup_logger(log_path)
+
+# Continue from the previous checkpoint
+if args.ckpt is not None:        
+    load_weights(model, args.ckpt)
+else:
+    if master_process:
+        logger.info("Training from scratch")
+
 # DDP
 if get_data_parallel_world_size() > 1:
     # model = DataParallel(model, process_group=get_data_parallel_group()) # easiest implementation
-    # model = DataParallel_Bucket(model, process_group=get_data_parallel_group(), bucket_cap_mb=25) # DDP implementation with bucket
-    model = torch.nn.parallel.DistributedDataParallel(model, process_group=get_data_parallel_group())
+    model = DataParallel_Bucket(model, process_group=get_data_parallel_group(), bucket_cap_mb=25) # DDP implementation with bucket
+    # model = torch.nn.parallel.DistributedDataParallel(model, process_group=get_data_parallel_group())
 
 # Loss function and optimizer
 criterion = nn.CrossEntropyLoss()  # reduction='mean' by default 
 optimizer = optim.Adam(model.parameters(), lr=train_config.lr, weight_decay=train_config.adam_weight_decay, betas=(train_config.adam_beta1, train_config.adam_beta2), eps=train_config.adam_eps)
-
-# Initialize the logger 
-log_path = "tools/benchmark/loss/loss.txt"
-logger = setup_logger(log_path)
 
 # Log some information 
 log_info(model_config,train_config,parallel_config, logger)
@@ -289,7 +300,7 @@ else:
                     current_time = time.time()
                     time_taken = current_time - start_time
                     tokens_per_second = tokens_per_step * log_interval / time_taken
-                    flops_per_gpu = model.get_flops(train_config.accumulation_steps, time_taken, num_params)/world_size 
+                    flops_per_gpu = model.get_flops(train_config.accumulation_steps, time_taken, num_params)/world_size if not isinstance(model, DataParallel) else model.module.get_flops(train_config.accumulation_steps, time_taken, num_params)/world_size
                     start_time = current_time
                     
                     if master_process:                            
@@ -320,7 +331,12 @@ else:
                                 "memory_reserved_gb": memory_reserved_gb,
                             }
                             # log_data["memory_reserved_gb"] = memory_reserved_gb
-                            wandb.log(log_data) 
+                            wandb.log(log_data)
+                        
+                    # performance drop? 
+                    if args.ckpt is not None and step % train_config.checkpoint_interval == 0 and train_config.checkpoint_interval > 0:
+                        parent_directory = f"{os.path.dirname(os.path.dirname(args.ckpt))}/{step}/" # checkpoint like : ckpt/100/ -> ckpt/200/
+                        save_weights(model, f"{parent_directory}")
 
                 # Check if the training should be stopped
                 if train_config.total_steps != -1 and step >= train_config.total_steps:
